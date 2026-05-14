@@ -1,0 +1,86 @@
+"""FastAPI application entrypoint for the Agentic DQ Observability Platform."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+from api.routers import approvals, discovery, monitoring, reporting, rules, sql
+from configs.logging_config import configure_logging
+from configs.settings import get_settings
+
+logger = structlog.get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(tracer_provider)
+
+    logger.info(
+        "application_startup",
+        environment=settings.environment,
+        version="1.0.0",
+    )
+    yield
+    logger.info("application_shutdown")
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+
+    app = FastAPI(
+        title="Agentic DQ Observability Platform",
+        description=(
+            "Production-grade AI-powered Data Quality & Observability Platform "
+            "using Claude API, BigQuery, and multi-agent orchestration."
+        ),
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"] if settings.environment == "development" else [],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(discovery.router, prefix="/api/v1/discovery", tags=["Discovery"])
+    app.include_router(rules.router, prefix="/api/v1/rules", tags=["Rules"])
+    app.include_router(approvals.router, prefix="/api/v1/approvals", tags=["Approvals"])
+    app.include_router(sql.router, prefix="/api/v1/sql", tags=["SQL"])
+    app.include_router(monitoring.router, prefix="/api/v1/monitoring", tags=["Monitoring"])
+    app.include_router(reporting.router, prefix="/api/v1/reporting", tags=["Reporting"])
+
+    @app.get("/health", tags=["Health"])
+    async def health_check():
+        return {"status": "healthy", "version": "1.0.0"}
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error("unhandled_exception", path=request.url.path, error=str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "error": "Internal server error", "detail": str(exc)},
+        )
+
+    return app
+
+
+app = create_app()

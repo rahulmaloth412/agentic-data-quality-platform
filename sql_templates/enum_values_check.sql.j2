@@ -1,0 +1,45 @@
+-- DQ Rule: Enum / Allowed Values Check
+-- Rule ID: {{ rule_id }}
+-- Table: {{ project_id }}.{{ dataset_name }}.{{ table_name }}
+-- Column: {{ column_name }}
+-- Allowed: {{ allowed_values_str }}
+INSERT INTO `{{ dq_project }}.{{ dq_dataset }}.dq_results`
+    (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+     rule_type, severity, status, observed_value, expected_value, threshold_value,
+     failure_count, execution_time, execution_duration_seconds, query_executed, created_at)
+WITH source_stats AS (
+    SELECT
+        COUNT(*)                                                    AS total_count,
+        COUNTIF(
+            `{{ column_name }}` IS NOT NULL
+            AND CAST(`{{ column_name }}` AS STRING) NOT IN ({{ allowed_values_str }})
+        )                                                           AS invalid_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+    {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
+),
+computed AS (
+    SELECT
+        total_count,
+        invalid_count,
+        SAFE_DIVIDE(invalid_count, NULLIF(total_count, 0)) AS invalid_rate
+    FROM source_stats
+)
+SELECT
+    '{{ run_id }}'                          AS run_id,
+    '{{ rule_id }}'                         AS rule_id,
+    '{{ project_id }}'                      AS project_id,
+    '{{ dataset_name }}'                    AS dataset_name,
+    '{{ table_name }}'                      AS table_name,
+    '{{ column_name }}'                     AS column_name,
+    'validity'                              AS rule_type,
+    '{{ severity }}'                        AS severity,
+    CASE WHEN invalid_count = 0 THEN 'PASS' ELSE 'FAIL' END     AS status,
+    CAST(invalid_count AS STRING)                               AS observed_value,
+    '0'                                                         AS expected_value,
+    '0'                                                         AS threshold_value,
+    invalid_count                                               AS failure_count,
+    CURRENT_TIMESTAMP()                                         AS execution_time,
+    NULL                                                        AS execution_duration_seconds,
+    '{{ query_hash }}'                                          AS query_executed,
+    CURRENT_TIMESTAMP()                                         AS created_at
+FROM computed;

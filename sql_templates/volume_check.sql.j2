@@ -1,0 +1,44 @@
+-- DQ Rule: Volume Anomaly Check
+-- Rule ID: {{ rule_id }}
+-- Table: {{ project_id }}.{{ dataset_name }}.{{ table_name }}
+-- Expected range: {{ min_rows }} - {% if has_max_rows %}{{ max_rows }}{% else %}unlimited{% endif %} rows
+INSERT INTO `{{ dq_project }}.{{ dq_dataset }}.dq_results`
+    (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+     rule_type, severity, status, observed_value, expected_value, threshold_value,
+     failure_count, execution_time, execution_duration_seconds, query_executed, created_at)
+WITH volume AS (
+    SELECT COUNT(*) AS row_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+    {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
+)
+SELECT
+    '{{ run_id }}'              AS run_id,
+    '{{ rule_id }}'             AS rule_id,
+    '{{ project_id }}'          AS project_id,
+    '{{ dataset_name }}'        AS dataset_name,
+    '{{ table_name }}'          AS table_name,
+    NULL                        AS column_name,
+    'volume'                    AS rule_type,
+    '{{ severity }}'            AS severity,
+    CASE
+        WHEN row_count < {{ min_rows }} THEN 'FAIL'
+        {% if has_max_rows %}
+        WHEN row_count > {{ max_rows }} THEN 'FAIL'
+        {% endif %}
+        ELSE 'PASS'
+    END                         AS status,
+    CAST(row_count AS STRING)   AS observed_value,
+    '{{ min_rows }}{% if has_max_rows %}-{{ max_rows }}{% endif %}'  AS expected_value,
+    CAST({{ min_rows }} AS STRING) AS threshold_value,
+    CASE
+        WHEN row_count < {{ min_rows }} THEN {{ min_rows }} - row_count
+        {% if has_max_rows %}
+        WHEN row_count > {{ max_rows }} THEN row_count - {{ max_rows }}
+        {% endif %}
+        ELSE 0
+    END                         AS failure_count,
+    CURRENT_TIMESTAMP()         AS execution_time,
+    NULL                        AS execution_duration_seconds,
+    '{{ query_hash }}'          AS query_executed,
+    CURRENT_TIMESTAMP()         AS created_at
+FROM volume;

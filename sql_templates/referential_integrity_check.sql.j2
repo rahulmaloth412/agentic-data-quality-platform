@@ -1,0 +1,41 @@
+-- DQ Rule: Referential Integrity Check
+-- Rule ID: {{ rule_id }}
+-- Source: {{ project_id }}.{{ dataset_name }}.{{ table_name }}.{{ column_name }}
+-- Reference: {{ ref_project }}.{{ ref_dataset }}.{{ ref_table }}.{{ ref_column }}
+INSERT INTO `{{ dq_project }}.{{ dq_dataset }}.dq_results`
+    (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+     rule_type, severity, status, observed_value, expected_value, threshold_value,
+     failure_count, execution_time, execution_duration_seconds, query_executed, created_at)
+WITH orphans AS (
+    SELECT COUNT(*) AS orphan_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}` src
+    LEFT JOIN `{{ ref_project }}.{{ ref_dataset }}.{{ ref_table }}` ref
+        ON CAST(src.`{{ column_name }}` AS STRING) = CAST(ref.`{{ ref_column }}` AS STRING)
+    WHERE src.`{{ column_name }}` IS NOT NULL
+      AND ref.`{{ ref_column }}` IS NULL
+),
+total AS (
+    SELECT COUNT(*) AS total_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+    WHERE `{{ column_name }}` IS NOT NULL
+)
+SELECT
+    '{{ run_id }}'                                                  AS run_id,
+    '{{ rule_id }}'                                                 AS rule_id,
+    '{{ project_id }}'                                              AS project_id,
+    '{{ dataset_name }}'                                            AS dataset_name,
+    '{{ table_name }}'                                              AS table_name,
+    '{{ column_name }}'                                             AS column_name,
+    'integrity'                                                     AS rule_type,
+    '{{ severity }}'                                                AS severity,
+    CASE WHEN o.orphan_count = 0 THEN 'PASS' ELSE 'FAIL' END       AS status,
+    CAST(o.orphan_count AS STRING)                                  AS observed_value,
+    '0'                                                             AS expected_value,
+    '0'                                                             AS threshold_value,
+    o.orphan_count                                                  AS failure_count,
+    CURRENT_TIMESTAMP()                                             AS execution_time,
+    NULL                                                            AS execution_duration_seconds,
+    '{{ query_hash }}'                                              AS query_executed,
+    CURRENT_TIMESTAMP()                                             AS created_at
+FROM orphans o
+CROSS JOIN total t;

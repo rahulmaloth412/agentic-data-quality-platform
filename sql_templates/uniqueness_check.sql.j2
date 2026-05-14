@@ -1,0 +1,49 @@
+-- DQ Rule: Uniqueness Check
+-- Rule ID: {{ rule_id }}
+-- Table: {{ project_id }}.{{ dataset_name }}.{{ table_name }}
+-- Columns: {{ columns_str }}
+INSERT INTO `{{ dq_project }}.{{ dq_dataset }}.dq_results`
+    (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+     rule_type, severity, status, observed_value, expected_value, threshold_value,
+     failure_count, execution_time, execution_duration_seconds, query_executed, created_at)
+WITH source_stats AS (
+    SELECT
+        COUNT(*)                            AS total_count,
+        COUNT(DISTINCT CONCAT(
+            {% for col in columns %}
+            COALESCE(CAST(`{{ col }}` AS STRING), '__NULL__')
+            {% if not loop.last %}, '|', {% endif %}
+            {% endfor %}
+        ))                                  AS distinct_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+    {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
+),
+duplicate_count AS (
+    SELECT COUNT(*) AS dup_count
+    FROM (
+        SELECT {{ columns_str }}, COUNT(*) AS cnt
+        FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+        {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
+        GROUP BY {{ columns_str }}
+        HAVING COUNT(*) > 1
+    )
+)
+SELECT
+    '{{ run_id }}'              AS run_id,
+    '{{ rule_id }}'             AS rule_id,
+    '{{ project_id }}'          AS project_id,
+    '{{ dataset_name }}'        AS dataset_name,
+    '{{ table_name }}'          AS table_name,
+    '{{ columns_str }}'         AS column_name,
+    'uniqueness'                AS rule_type,
+    '{{ severity }}'            AS severity,
+    CASE WHEN d.dup_count = 0 THEN 'PASS' ELSE 'FAIL' END  AS status,
+    CAST(d.dup_count AS STRING)                             AS observed_value,
+    '0'                                                     AS expected_value,
+    '0'                                                     AS threshold_value,
+    d.dup_count                                             AS failure_count,
+    CURRENT_TIMESTAMP()                                     AS execution_time,
+    NULL                                                    AS execution_duration_seconds,
+    '{{ query_hash }}'                                      AS query_executed,
+    CURRENT_TIMESTAMP()                                     AS created_at
+FROM duplicate_count d;

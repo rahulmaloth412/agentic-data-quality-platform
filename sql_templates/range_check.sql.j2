@@ -1,0 +1,42 @@
+-- DQ Rule: Numeric Range Check
+-- Rule ID: {{ rule_id }}
+-- Table: {{ project_id }}.{{ dataset_name }}.{{ table_name }}
+-- Column: {{ column_name }}
+-- Range: {% if has_min %}min={{ min_value }}{% endif %}{% if has_max %} max={{ max_value }}{% endif %}
+INSERT INTO `{{ dq_project }}.{{ dq_dataset }}.dq_results`
+    (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+     rule_type, severity, status, observed_value, expected_value, threshold_value,
+     failure_count, execution_time, execution_duration_seconds, query_executed, created_at)
+WITH source_stats AS (
+    SELECT
+        COUNT(*)    AS total_count,
+        COUNTIF(
+            `{{ column_name }}` IS NOT NULL
+            AND (
+                {% if has_min %}CAST(`{{ column_name }}` AS FLOAT64) < {{ min_value }}{% endif %}
+                {% if has_min and has_max %} OR {% endif %}
+                {% if has_max %}CAST(`{{ column_name }}` AS FLOAT64) > {{ max_value }}{% endif %}
+            )
+        )           AS out_of_range_count
+    FROM `{{ project_id }}.{{ dataset_name }}.{{ table_name }}`
+    {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
+)
+SELECT
+    '{{ run_id }}'                              AS run_id,
+    '{{ rule_id }}'                             AS rule_id,
+    '{{ project_id }}'                          AS project_id,
+    '{{ dataset_name }}'                        AS dataset_name,
+    '{{ table_name }}'                          AS table_name,
+    '{{ column_name }}'                         AS column_name,
+    'validity'                                  AS rule_type,
+    '{{ severity }}'                            AS severity,
+    CASE WHEN out_of_range_count = 0 THEN 'PASS' ELSE 'FAIL' END   AS status,
+    CAST(out_of_range_count AS STRING)                              AS observed_value,
+    '{% if has_min %}{{ min_value }}{% endif %}-{% if has_max %}{{ max_value }}{% endif %}'  AS expected_value,
+    '0'                                                             AS threshold_value,
+    out_of_range_count                                              AS failure_count,
+    CURRENT_TIMESTAMP()                                             AS execution_time,
+    NULL                                                            AS execution_duration_seconds,
+    '{{ query_hash }}'                                              AS query_executed,
+    CURRENT_TIMESTAMP()                                             AS created_at
+FROM source_stats;
