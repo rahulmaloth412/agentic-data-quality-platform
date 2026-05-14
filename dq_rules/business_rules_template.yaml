@@ -1,5 +1,5 @@
 # Business Rules Template — User-Defined DQ Rules
-# Copy this file and customize for your specific dataset.
+# Copy this file and customize for your specific dataset
 
 version: "1.0.0"
 dataset: "your_dataset"
