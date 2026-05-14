@@ -4,7 +4,7 @@ A production-grade, enterprise-ready **AI-powered Data Quality and Observability
 
 ---
 
-## Architecture Overview
+## Architecture Overview 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
