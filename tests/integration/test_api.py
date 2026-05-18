@@ -26,8 +26,8 @@ def mock_settings():
         settings.gcp.project_id = "test-project"
         settings.gcp.dq_dataset = "test_dq"
         settings.gcp.dataplex_enabled = False
-        settings.anthropic.api_key = "test-key"
-        settings.anthropic.model = "claude-sonnet-4-6"
+        settings.gemini.api_key = "test-key"
+        settings.gemini.model = "gemini-1.5-flash"
         settings.slack.webhook_url = None
         settings.email.sendgrid_api_key = None
         mock.return_value = settings

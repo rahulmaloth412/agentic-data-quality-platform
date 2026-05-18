@@ -27,7 +27,6 @@ from schemas.models import (
     WorkflowState,
 )
 from tools.bigquery.client import BigQueryClient, get_bq_client
-from tools.bigquery.execution import persist_dq_results
 
 logger = structlog.get_logger(__name__)
 
@@ -218,6 +217,15 @@ class OrchestratorAgent(BaseAgent):
             state.rule_set.technical_rules = []
             state.rule_set.business_rules = []
 
+        # Auto-generate SQL and store as BigQuery stored procedures immediately on approval
+        if status == ApprovalStatus.APPROVED and state.rule_set:
+            self._log.info("auto_sql_generation_triggered", session_id=state.session_id)
+            try:
+                state = await self.run_stage_sql_generation(state)
+            except Exception as exc:
+                state.record_error("auto_sql_generation", str(exc))
+                self._log.error("auto_sql_generation_failed", error=str(exc))
+
         await self._persist_state(state)
         return state
 
@@ -234,16 +242,41 @@ class OrchestratorAgent(BaseAgent):
 
         try:
             run_id = f"run_{uuid.uuid4().hex[:12]}"
-            all_rules = state.rule_set.all_rules
+            # Only generate SQL for rules the user has approved (is_active=True)
+            active_rules = [r for r in state.rule_set.all_rules if r.is_active]
             updated_rules = await self._sql_agent.run(
-                rules=all_rules,
+                rules=active_rules,
                 table_metadata=state.metadata,
                 run_id=run_id,
             )
             state.rule_set.rules = updated_rules
             state.rule_set.technical_rules = []
             state.rule_set.business_rules = []
-            self._log.info("sql_generation_done", rules_with_sql=sum(1 for r in updated_rules if r.generated_sql))
+            rules_with_sql = sum(1 for r in updated_rules if r.generated_sql)
+            self._log.info("sql_generation_done", active_rules=len(active_rules), rules_with_sql=rules_with_sql)
+
+            # Persist rule configs (including generated SQL) to dq_rule_config
+            await self._sql_agent.persist_rules_to_bigquery(
+                updated_rules,
+                session_id=state.session_id,
+                rule_set_version_id=state.rule_set.rule_set_version_id,
+                bq_client=self._bq_client,
+            )
+
+            # Create ONE consolidated stored procedure for all approved rules
+            try:
+                sp_name = await self._sql_agent.create_consolidated_stored_procedure(
+                    updated_rules,
+                    bq_client=self._bq_client,
+                    session_id=state.session_id,
+                )
+                if sp_name:
+                    state.consolidated_sp_name = sp_name
+                    self._log.info("consolidated_sp_stored", sp=sp_name)
+            except Exception as sp_exc:
+                # SP creation failed (e.g. BQ credentials issue) — log but don't block workflow
+                state.record_error("consolidated_sp_creation", str(sp_exc))
+                self._log.error("consolidated_sp_creation_failed", error=str(sp_exc))
         except Exception as exc:
             state.record_error("sql_generation", str(exc))
 

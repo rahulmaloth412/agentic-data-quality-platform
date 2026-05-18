@@ -7,6 +7,81 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
+def generate_consolidated_sp_dag(
+    session_id: str,
+    sp_name: str,
+    dq_project: str,
+    dq_dataset: str,
+    schedule: str = "0 6 * * *",
+    owner: str = "data-quality",
+) -> str:
+    """Generate an Airflow 2.x DAG that executes the consolidated DQ stored procedure.
+
+    The DAG calls CALL `project.dataset.sp_name`(run_id) as a single BigQuery job,
+    giving full schedule control via Cloud Composer without per-rule task overhead.
+    """
+    dag_id = f"dq_pipeline_{session_id[:12]}"
+    generated_at = datetime.utcnow().isoformat()
+    return f'''"""
+Auto-generated DQ Validation DAG
+Session   : {session_id}
+Procedure : {dq_project}.{dq_dataset}.{sp_name}
+Generated : {generated_at}Z
+DO NOT EDIT MANUALLY — regenerate via the DQ Platform.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+
+from airflow.decorators import dag
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.utils.dates import days_ago
+
+DAG_ID     = "{dag_id}"
+PROJECT    = "{dq_project}"
+DQ_DATASET = "{dq_dataset}"
+SP_NAME    = "{sp_name}"
+
+DEFAULT_ARGS = {{
+    "owner": "{owner}",
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "depends_on_past": False,
+    "email_on_failure": True,
+}}
+
+
+@dag(
+    dag_id=DAG_ID,
+    default_args=DEFAULT_ARGS,
+    description="Consolidated DQ validation — session {session_id}",
+    schedule_interval="{schedule}",
+    start_date=days_ago(1),
+    catchup=False,
+    max_active_runs=1,
+    tags=["data-quality", "dq-platform", "{session_id}"],
+)
+def dq_pipeline():
+    BigQueryInsertJobOperator(
+        task_id="execute_dq_stored_procedure",
+        configuration={{
+            "query": {{
+                "query": (
+                    "CALL `{dq_project}.{dq_dataset}.{sp_name}`"
+                    "(\\'{{{{ run_id }}}}\\')"
+                ),
+                "useLegacySql": False,
+            }}
+        }},
+        project_id=PROJECT,
+        gcp_conn_id="google_cloud_default",
+    )
+
+
+dag_instance = dq_pipeline()
+'''
+
+
 def generate_standalone_dag(
     session_id: str,
     rules: list[dict[str, Any]],

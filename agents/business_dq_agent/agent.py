@@ -36,7 +36,7 @@ _SEVERITY_MAP = {
 
 
 class BusinessRuleRecommendationAgent(BaseAgent):
-    """Uses Claude to infer intelligent business DQ rules from table semantics."""
+    """Uses Gemini to generate business-domain DQ rules from table schema and context."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -55,28 +55,66 @@ class BusinessRuleRecommendationAgent(BaseAgent):
         rule_set_version_id: str,
         custom_context: str | None = None,
     ) -> list[DQRule]:
-        """Generate Claude-inferred business DQ rules for a single table."""
+        """Generate Gemini-inferred business DQ rules for a single table."""
+        columns = metadata.get("columns", [])
         self._log.info(
             "business_rule_inference_start",
             table=table_name,
-            columns=len(metadata.get("columns", [])),
+            columns=len(columns),
         )
+
+        # Schema is the primary input — always available
+        schema_rows = [
+            {
+                "column": c.get("column_name", ""),
+                "type": c.get("data_type", "STRING"),
+                "nullable": c.get("is_nullable", "YES") == "YES",
+            }
+            for c in columns
+        ]
+        schema_json = json.dumps(schema_rows, indent=2)
+
+        # Profiles section — include only when meaningful data exists
+        col_profiles = profiles.get("columns", []) if isinstance(profiles, dict) else []
+        if col_profiles:
+            profiles_section = (
+                "## Column Profiles (statistics)\n"
+                + json.dumps(col_profiles, indent=2, default=str)[:3000]
+            )
+        else:
+            profiles_section = ""
+
+        # Semantics section — include only when Gemini inferred them earlier
+        if semantics:
+            semantics_section = (
+                "## Inferred Column Semantics\n"
+                + json.dumps(semantics, indent=2, default=str)[:2000]
+            )
+        else:
+            semantics_section = ""
+
+        # User-provided business context
+        if custom_context:
+            user_context_section = f"## Additional Business Context (provided by analyst)\n{custom_context}"
+        else:
+            user_context_section = ""
 
         prompt = RULE_INFERENCE_PROMPT_V1.format(
             project_id=project_id,
             dataset_id=dataset_id,
             table_name=table_name,
-            metadata_json=json.dumps(metadata, indent=2, default=str)[:4000],
-            profiles_json=json.dumps(profiles, indent=2, default=str)[:4000],
-            semantics_json=json.dumps(semantics, indent=2, default=str)[:2000],
+            schema_json=schema_json,
+            profiles_section=profiles_section,
+            semantics_section=semantics_section,
+            user_context_section=user_context_section,
         )
-
-        if custom_context:
-            prompt += f"\n\nAdditional business context:\n{custom_context}"
 
         try:
             result = await self._call_claude_json(prompt)
             raw_rules = result.get("rules", [])
+            inferred_domain = result.get("inferred_domain", "")
+            if inferred_domain:
+                self._log.info("domain_inferred", table=table_name, domain=inferred_domain)
 
             dq_rules = [
                 self._parse_rule(raw, project_id, dataset_id, table_name, rule_set_version_id)
@@ -84,11 +122,11 @@ class BusinessRuleRecommendationAgent(BaseAgent):
                 if isinstance(raw, dict)
             ]
 
-            self._log.info("business_rules_generated", count=len(dq_rules))
+            self._log.info("business_rules_generated", table=table_name, count=len(dq_rules))
             return dq_rules
 
         except Exception as exc:
-            self._log.error("business_rule_inference_failed", error=str(exc))
+            self._log.error("business_rule_inference_failed", table=table_name, error=str(exc))
             return []
 
     def _parse_rule(
@@ -114,7 +152,6 @@ class BusinessRuleRecommendationAgent(BaseAgent):
             dataset_name=dataset,
             table_name=table,
             column_name=raw.get("column_name"),
-            sql_template=raw.get("sql_template"),
             parameters=raw.get("parameters", {}),
             rationale=raw.get("rationale"),
             rule_set_version_id=version_id,

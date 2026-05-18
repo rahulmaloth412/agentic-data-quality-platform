@@ -20,11 +20,11 @@ class GCPSettings(BaseSettings):
     dataplex_location: str = Field(default="us-central1")
 
 
-class AnthropicSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ANTHROPIC_", env_file=".env", extra="ignore")
+class GeminiSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="GEMINI_", env_file=".env", extra="ignore")
 
-    api_key: str = Field(default="", description="Anthropic API key")
-    model: str = Field(default="claude-sonnet-4-6", description="Default Claude model")
+    api_key: str = Field(default="", description="Gemini API key")
+    model: str = Field(default="gemini-2.5-flash-lite", description="Default Gemini model")
     max_tokens: int = Field(default=8192, description="Max output tokens")
     timeout: float = Field(default=120.0, description="API request timeout in seconds")
 
@@ -73,7 +73,7 @@ class AppSettings(BaseSettings):
     environment: str = Field(default="development", alias="ENVIRONMENT")
 
     gcp: GCPSettings = Field(default_factory=GCPSettings)
-    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     slack: SlackSettings = Field(default_factory=SlackSettings)
     email: EmailSettings = Field(default_factory=EmailSettings)
     airflow: AirflowSettings = Field(default_factory=AirflowSettings)

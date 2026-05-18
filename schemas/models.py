@@ -256,6 +256,7 @@ class WorkflowState(BaseModel):
     approval_2_status: ApprovalStatus = ApprovalStatus.PENDING
     dag_config: Optional[dict[str, Any]] = None
     monitoring_config: Optional[dict[str, Any]] = None
+    consolidated_sp_name: Optional[str] = None
     errors: list[dict[str, Any]] = Field(default_factory=list)
     retry_count: int = 0
     max_retries: int = 3

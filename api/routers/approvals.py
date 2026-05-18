@@ -30,8 +30,11 @@ async def submit_approval(
             detail=f"Session {request.session_id} not found",
         )
 
-    orchestrator = _get_orchestrator()
+    if request.stage not in ("approval_1", "approval_2"):
+        raise HTTPException(status_code=400, detail=f"Unknown stage: {request.stage}. Must be approval_1 or approval_2.")
+
     try:
+        orchestrator = _get_orchestrator()
         if request.stage == "approval_1":
             state = await orchestrator.process_approval_1(
                 state=state,
@@ -42,15 +45,26 @@ async def submit_approval(
                 rule_modifications=request.rule_modifications,
             )
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown stage: {request.stage}")
+            # approval_2: approve monitoring config before reporting stage
+            state.approval_2_status = request.status
+            from datetime import datetime
+            state.updated_at = datetime.utcnow()
 
         _sessions[request.session_id] = state
 
-        next_action = (
-            "Proceed to SQL generation via POST /sql/generate"
-            if request.status == ApprovalStatus.APPROVED
-            else "Workflow halted. Review rejection comments."
-        )
+        if request.stage == "approval_1":
+            next_action = (
+                "SQL generated and stored as BigQuery stored procedures automatically. "
+                "Proceed to DQ execution via POST /api/v1/sql/execute"
+                if request.status == ApprovalStatus.APPROVED
+                else "Workflow halted. Review rejection comments."
+            )
+        else:
+            next_action = (
+                "Monitoring config approved. Workflow complete."
+                if request.status == ApprovalStatus.APPROVED
+                else "Workflow halted. Review rejection comments."
+            )
 
         return APIResponse(
             success=True,

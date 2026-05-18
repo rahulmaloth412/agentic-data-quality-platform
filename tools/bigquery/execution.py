@@ -14,6 +14,43 @@ from tools.bigquery.client import BigQueryClient
 
 logger = structlog.get_logger(__name__)
 
+
+async def ensure_dq_infrastructure(
+    client: BigQueryClient, project: str, dataset: str
+) -> None:
+    """Create required DQ tables (and dataset) if they don't already exist.
+
+    Raises RuntimeError if the dataset or tables cannot be created so callers
+    receive a clear error rather than a confusing 'table not found' crash later.
+    """
+    from schemas.bq_schemas import CREATE_TABLE_SQLS, format_ddl
+    from google.cloud import bigquery as bq
+
+    log = logger.bind(project=project, dataset=dataset)
+
+    try:
+        raw_client = client._get_client()
+        dataset_ref = bq.Dataset(f"{project}.{dataset}")
+        dataset_ref.location = "US"
+        raw_client.create_dataset(dataset_ref, exists_ok=True)
+        log.info("dq_dataset_ensured", dataset=dataset)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not create BigQuery dataset `{project}.{dataset}`. "
+            f"Check GCP credentials and project permissions. Detail: {exc}"
+        ) from exc
+
+    for table_key in ("dq_results", "dq_rule_config"):
+        ddl = format_ddl(CREATE_TABLE_SQLS[table_key], project, dataset)
+        try:
+            await client.execute_dml(ddl)
+            log.info("table_ensured", table=table_key)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not create BigQuery table `{project}.{dataset}.{table_key}`. "
+                f"Detail: {exc}"
+            ) from exc
+
 _DEFAULT_CONCURRENCY = 10
 
 
@@ -21,8 +58,10 @@ async def execute_dq_rule(
     client: BigQueryClient,
     rule: dict[str, Any],
     run_id: str,
+    dq_project: str = "",
+    dq_dataset: str = "",
 ) -> dict[str, Any]:
-    """Execute a single DQ rule's generated SQL and return a DQResult-compatible dict."""
+    """Execute a single DQ rule's SQL, injecting run_id as a named parameter."""
     rule_id = rule.get("rule_id", "unknown")
     sql = rule.get("generated_sql", "")
     log = logger.bind(rule_id=rule_id, run_id=run_id)
@@ -34,17 +73,12 @@ async def execute_dq_rule(
     start = time.monotonic()
     try:
         log.info("executing_dq_rule")
-        await client.execute_dml(sql)
+        # run_id is a named parameter (@run_id) in the INSERT SQL — injected here so
+        # the same generated SQL works across multiple execution runs without regeneration
+        await client.execute_dml(sql, params={"run_id": run_id})
         duration = time.monotonic() - start
-
-        result_rows = await _fetch_latest_result(client, rule, run_id)
-        if result_rows:
-            result = dict(result_rows[0])
-            result["execution_duration_seconds"] = round(duration, 3)
-            return result
-
-        log.warning("no_result_row_after_execution")
-        return _build_result(rule, run_id, "ERROR", error="No result row found after execution", duration=duration)
+        log.info("dq_rule_executed", duration=round(duration, 3))
+        return _build_result(rule, run_id, "EXECUTED", duration=duration)
 
     except Exception as exc:
         duration = time.monotonic() - start
@@ -57,13 +91,15 @@ async def execute_dq_ruleset(
     rules: list[dict[str, Any]],
     run_id: str,
     concurrency: int = _DEFAULT_CONCURRENCY,
+    dq_project: str = "",
+    dq_dataset: str = "",
 ) -> list[dict[str, Any]]:
     """Execute all DQ rules in parallel with a concurrency limit."""
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _bounded(rule: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await execute_dq_rule(client, rule, run_id)
+            return await execute_dq_rule(client, rule, run_id, dq_project, dq_dataset)
 
     tasks = [_bounded(rule) for rule in rules]
     results = await asyncio.gather(*tasks)
@@ -117,6 +153,8 @@ async def get_run_summary(
     dataset: str,
 ) -> dict[str, Any]:
     """Aggregate pass/fail/error counts for a completed DQ run."""
+    from google.api_core import exceptions as gcp_exc
+
     sql = f"""
     SELECT
         status,
@@ -126,7 +164,11 @@ async def get_run_summary(
     WHERE run_id = @run_id
     GROUP BY status, severity
     """
-    rows = await client.execute_query(sql, params={"run_id": run_id})
+    try:
+        rows = await client.execute_query(sql, params={"run_id": run_id})
+    except gcp_exc.NotFound:
+        logger.warning("dq_results_table_missing", project=project, dataset=dataset, run_id=run_id)
+        rows = []
 
     totals: dict[str, int] = {"PASS": 0, "FAIL": 0, "ERROR": 0, "SKIPPED": 0}
     critical_failures = 0
@@ -155,29 +197,6 @@ async def get_run_summary(
         "pass_rate": round(pass_rate, 4),
         "health_score": round(health_score, 2),
     }
-
-
-async def _fetch_latest_result(
-    client: BigQueryClient,
-    rule: dict[str, Any],
-    run_id: str,
-) -> list[dict[str, Any]]:
-    """Fetch the result row inserted by the rule's SQL from dq_results."""
-    project = rule.get("project_id", "")
-    dataset = rule.get("dataset_name", "")
-    rule_id = rule.get("rule_id", "")
-
-    if not all([project, dataset, rule_id]):
-        return []
-
-    sql = f"""
-    SELECT *
-    FROM `{project}.{dataset}.dq_results`
-    WHERE run_id = @run_id AND rule_id = @rule_id
-    ORDER BY execution_time DESC
-    LIMIT 1
-    """
-    return await client.execute_query(sql, params={"run_id": run_id, "rule_id": rule_id})
 
 
 def _build_result(

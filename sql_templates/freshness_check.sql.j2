@@ -19,7 +19,7 @@ WITH freshness AS (
     WHERE `{{ timestamp_column }}` IS NOT NULL
 )
 SELECT
-    '{{ run_id }}'                                          AS run_id,
+    @run_id                                                 AS run_id,
     '{{ rule_id }}'                                         AS rule_id,
     '{{ project_id }}'                                      AS project_id,
     '{{ dataset_name }}'                                    AS dataset_name,

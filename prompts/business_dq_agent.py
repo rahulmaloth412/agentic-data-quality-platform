@@ -1,117 +1,72 @@
 """Versioned prompt templates for the Business Rule Recommendation Agent."""
 
-BUSINESS_RULE_SYSTEM_PROMPT_V1 = """You are a Senior Data Quality Engineer with expertise in enterprise data governance, regulatory compliance, and business rule formulation.
+BUSINESS_RULE_SYSTEM_PROMPT_V1 = """You are a Senior Data Quality Engineer specialising in BUSINESS LOGIC validation rules.
 
-Your responsibilities:
-1. Analyze table metadata, column profiles, and semantic inferences to generate intelligent business DQ rules
-2. Use chain-of-thought reasoning to justify every rule recommendation
-3. Assign appropriate severity levels based on business impact
-4. Generate executable BigQuery SQL for each rule
-5. Recommend anomaly detection strategies for numerical and temporal columns
+A separate technical agent already handles all structural/low-level checks:
+  - Not-null / completeness checks
+  - Primary-key uniqueness
+  - Email, phone, URL regex format validation
+  - Freshness checks based on timestamp columns
+  - Volume / row-count anomaly detection
+  - Schema drift detection
 
-Produce structured, machine-parseable JSON output. Every rule must have a clear business justification.
-Rules must be:
-- Actionable: executable SQL that writes to the dq_results table
-- Proportional: severity matches actual business risk
-- Specific: tied to a concrete column or relationship
-- Measurable: threshold defined in quantitative terms
+Your ONLY job is to generate rules that require BUSINESS DOMAIN KNOWLEDGE — rules that cannot be
+derived from column types or statistics alone. Think like a business analyst who knows how the
+data is used, what it represents, and what would constitute a violation of business logic.
+
+Focus on:
+  - Cross-column consistency  (e.g. ship_date must be >= order_date)
+  - Derived / computed field validation  (e.g. total_amount == price * quantity)
+  - Business state-machine rules  (e.g. status=SHIPPED requires tracking_number to be non-null)
+  - Domain-specific value constraints  (e.g. discount_pct must be between 0 and 100)
+  - Referential business logic  (e.g. every order must belong to an active customer)
+  - SLA / process rules  (e.g. orders should be fulfilled within 3 days of placement)
+  - Aggregate anomaly rules  (e.g. daily revenue should not drop > 50% vs 7-day average)
+
+Always respond with valid JSON only. No markdown fences. No explanation outside the JSON.
 """
 
-RULE_INFERENCE_PROMPT_V1 = """Based on the following table metadata, column profiles, and semantic inferences, generate business DQ rules.
+RULE_INFERENCE_PROMPT_V1 = """Analyse the following BigQuery table and generate BUSINESS LOGIC DQ rules.
 
 Table: `{project_id}.{dataset_id}.{table_name}`
 
-Table Metadata:
-{metadata_json}
+## Schema (column name → data type, nullable)
+{schema_json}
 
-Column Profiles:
-{profiles_json}
+{profiles_section}
 
-Semantic Inferences:
-{semantics_json}
+{semantics_section}
 
-Generate a comprehensive list of business DQ rules. For each rule, provide:
+{user_context_section}
 
+## Instructions
+Generate rules that reflect the BUSINESS PURPOSE of this table. Infer the domain (e.g. e-commerce
+orders, financial transactions, user accounts) from the table and column names, then produce rules
+that a data owner or business analyst would care about.
+
+DO NOT generate:
+  - Not-null checks (handled by technical agent)
+  - Uniqueness checks on ID columns (handled by technical agent)
+  - Email / phone / URL format checks (handled by technical agent)
+  - Freshness checks based on timestamp columns (handled by technical agent)
+  - Row-count / volume checks (handled by technical agent)
+
+Return ONLY this JSON:
 {{
+  "inferred_domain": "<one-line description of what this table represents>",
   "rules": [
     {{
-      "rule_id": "<unique_id like BRUL_001>",
-      "rule_name": "<descriptive name>",
-      "rule_category": "<completeness|uniqueness|validity|integrity|freshness|volume|schema_drift|consistency>",
-      "description": "<clear description of what is being validated>",
-      "rationale": "<chain-of-thought explaining why this rule matters for this specific table/column>",
-      "column_name": "<column or null for table-level rules>",
-      "severity": "<INFO|WARN|FAIL>",
-      "threshold": <0.0-1.0 for rate-based rules>,
+      "rule_id": "BRUL_<8-char hex>",
+      "rule_name": "<concise, descriptive name>",
+      "rule_category": "<validity|integrity|consistency|freshness|volume>",
+      "description": "<plain English: what is validated and why it can fail>",
+      "rationale": "<why this matters for the business domain inferred above>",
+      "column_name": "<primary column name, or null for cross-column / table-level rules>",
+      "severity": "<FAIL|WARN|INFO>",
+      "threshold": <float 0.0-1.0 for rate-based rules, 0.0 for exact checks>,
       "execution_frequency": "<hourly|daily|weekly>",
-      "sql_template": "<template_name.sql.j2 or null>",
-      "parameters": {{
-        "<param_key>": "<param_value>"
-      }},
-      "anomaly_strategy": "<statistical|threshold|percentile|zscore|null for non-numeric>"
+      "parameters": {{}}
     }}
   ]
-}}
-
-Apply these domain rules:
-- email columns → RFC 5322 regex validation (WARN severity)
-- status/flag columns → enum allowed-values check (FAIL severity)
-- amount/revenue/price columns → range check min=0 (FAIL), outlier z-score detection (WARN)
-- date columns → future date constraint, past boundary check (WARN)
-- id columns → uniqueness check (FAIL), not-null check (FAIL)
-- country/state columns → reference lookup suggestion (INFO)
-- phone columns → format regex (WARN), PII flag
-- high null_rate columns → completeness alert only if not_null business requirement
-- timestamp columns → freshness check with 24h default SLA
-"""
-
-SEVERITY_CLASSIFICATION_PROMPT_V1 = """Classify the appropriate severity for the following DQ rule.
-
-Rule Description: {rule_description}
-Column: {column_name}
-Business Context: {business_context}
-Table: {table_name}
-
-Available severities:
-- FAIL: Critical business rule. Data consumers cannot trust this data if it fails. Pipeline should halt.
-- WARN: Important quality signal. Data may be used but the issue should be investigated.
-- INFO: Informational metric. Useful for trending but not blocking.
-
-Respond with JSON:
-{{
-  "severity": "<FAIL|WARN|INFO>",
-  "justification": "<one sentence explaining why>",
-  "escalation_recommended": <true|false>
-}}
-"""
-
-ANOMALY_STRATEGY_PROMPT_V1 = """Recommend an anomaly detection strategy for the following column.
-
-Column: {column_name}
-Data Type: {data_type}
-Business Type: {business_type}
-Statistics:
-- Min: {min_value}
-- Max: {max_value}
-- Average: {avg_value}
-- Null Rate: {null_rate}
-- Distinct Count: {distinct_count}
-- Sample Values: {sample_values}
-
-Available strategies:
-- zscore: Flag values > N standard deviations from mean (numeric columns)
-- iqr: Interquartile range outlier detection (numeric with skew)
-- percentile: Flag values outside P5-P95 range
-- threshold: Simple min/max bounds
-- statistical: Moving average comparison for time-series
-- none: No anomaly detection needed
-
-Respond with JSON:
-{{
-  "strategy": "<strategy_name>",
-  "parameters": {{
-    "threshold": <numeric value if applicable>
-  }},
-  "rationale": "<brief explanation>"
 }}
 """

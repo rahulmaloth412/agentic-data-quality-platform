@@ -10,7 +10,7 @@ import structlog
 
 from schemas.models import DQRule, DQRunResult
 from tools.bigquery.client import BigQueryClient
-from tools.bigquery.execution import execute_dq_ruleset, get_run_summary, persist_dq_results
+from tools.bigquery.execution import ensure_dq_infrastructure, execute_dq_ruleset, get_run_summary
 
 logger = structlog.get_logger(__name__)
 
@@ -31,8 +31,13 @@ class ValidationAgent:
         rule_set_version_id: str,
         run_id: str | None = None,
         concurrency: int = 10,
+        consolidated_sp_name: str | None = None,
     ) -> DQRunResult:
-        """Execute all DQ rules in parallel and return aggregated run results."""
+        """Execute DQ rules and return aggregated run results.
+
+        If `consolidated_sp_name` is provided, the execution uses a single CALL
+        to the consolidated stored procedure. Otherwise falls back to per-rule execution.
+        """
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
         started_at = datetime.utcnow()
 
@@ -41,22 +46,36 @@ class ValidationAgent:
             session_id=session_id,
             run_id=run_id,
             rule_count=len(rules),
+            mode="consolidated_sp" if consolidated_sp_name else "per_rule",
         )
 
-        rules_with_sql = [r for r in rules if r.generated_sql]
-        skipped = len(rules) - len(rules_with_sql)
+        await ensure_dq_infrastructure(self._bq_client, self._dq_project, self._dq_dataset)
 
-        if skipped > 0:
-            self._log.warning("rules_skipped_no_sql", count=skipped)
-
-        # Execute all rules
-        rule_dicts = [self._rule_to_dict(rule) for rule in rules_with_sql]
-        results = await execute_dq_ruleset(
-            self._bq_client, rule_dicts, run_id, concurrency=concurrency
-        )
-
-        # Persist results to BigQuery
-        await persist_dq_results(self._bq_client, results, self._dq_project, self._dq_dataset)
+        if consolidated_sp_name:
+            # Single CALL executes the full consolidated procedure
+            call_sql = (
+                f"CALL `{self._dq_project}.{self._dq_dataset}.{consolidated_sp_name}`"
+                f"('{run_id}')"
+            )
+            try:
+                await self._bq_client.execute_dml(call_sql)
+                self._log.info("consolidated_sp_executed", sp=consolidated_sp_name, run_id=run_id)
+            except Exception as exc:
+                self._log.error("consolidated_sp_execution_failed", error=str(exc))
+            skipped = 0
+        else:
+            # Per-rule fallback — each INSERT uses @run_id parameter
+            active_rules = [r for r in rules if r.is_active and r.generated_sql]
+            skipped = len(rules) - len(active_rules)
+            if skipped > 0:
+                self._log.warning("rules_skipped", count=skipped)
+            rule_dicts = [self._rule_to_dict(rule) for rule in active_rules]
+            await execute_dq_ruleset(
+                self._bq_client, rule_dicts, run_id,
+                concurrency=concurrency,
+                dq_project=self._dq_project,
+                dq_dataset=self._dq_dataset,
+            )
 
         # Compute summary
         summary = await get_run_summary(

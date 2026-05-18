@@ -278,6 +278,31 @@ class SQLBuilder:
             },
         )
 
+    def build_schema_drift_check(
+        self,
+        run_id: str,
+        rule_id: str,
+        project: str,
+        dataset: str,
+        table: str,
+        baseline_columns: list[dict[str, Any]],
+        severity: str = "WARN",
+    ) -> str:
+        import json as _json
+        return self.render_template(
+            "schema_drift_check.sql.j2",
+            {
+                "run_id": run_id,
+                "rule_id": rule_id,
+                "project_id": project,
+                "dataset_name": dataset,
+                "table_name": table,
+                "baseline_columns_json": _json.dumps(baseline_columns),
+                "severity": severity,
+                "query_hash": _hash_sql(f"schema_drift:{project}.{dataset}.{table}"),
+            },
+        )
+
     def build_custom_sql(self, template_str: str, params: dict[str, Any]) -> str:
         """Render an arbitrary Jinja2 template string with parameters."""
         from jinja2 import Template

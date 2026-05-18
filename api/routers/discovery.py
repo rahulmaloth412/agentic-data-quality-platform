@@ -18,6 +18,22 @@ router = APIRouter()
 _sessions: dict[str, WorkflowState] = {}
 
 
+def _check_gcp_credentials() -> None:
+    """Raise HTTPException 503 immediately if GCP credentials are not configured."""
+    import google.auth
+    from google.auth.exceptions import DefaultCredentialsError
+    try:
+        google.auth.default()
+    except DefaultCredentialsError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Google Cloud credentials are not configured. "
+                "Run: gcloud auth application-default login"
+            ),
+        )
+
+
 def _get_orchestrator() -> OrchestratorAgent:
     return OrchestratorAgent()
 
@@ -33,8 +49,9 @@ async def start_discovery(
     request: DiscoveryRequest,
     _: str = Depends(verify_api_key),
 ) -> APIResponse:
-    orchestrator = _get_orchestrator()
+    _check_gcp_credentials()
     try:
+        orchestrator = _get_orchestrator()
         state = await orchestrator.start_workflow(
             project_id=request.project_id,
             dataset_id=request.dataset_id,

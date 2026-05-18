@@ -1,0 +1,204 @@
+You are a senior UI/UX engineer and full-stack architect working on an enterprise-grade AI-powered Data Quality (DQ) platform.
+
+I want you to enhance and refactor the existing UI and workflow with the following requirements.
+
+# Core UI and Workflow Changes
+
+## 1. Remove Results/Report Section
+
+* Completely remove the “Results” or “Report” section from the UI.
+* The application should no longer display generated reports, profiling summaries, or execution result panels in the frontend.
+* Keep the UI focused on:
+
+  * DQ workflow configuration
+  * Rule generation
+  * Rule management
+  * SQL/stored procedure generation
+  * Execution orchestration
+
+---
+
+# 2. Rule Generation Toggle Behavior
+
+In the “New DQ Workflow” section there are currently two toggles:
+
+* Technical Rules
+* Business Rules
+
+Enhance the behavior as follows:
+
+## Business Rules Toggle Logic
+
+* If the user disables/unselects “Generate Business Rules”:
+
+  * The engine must NOT invoke any business-rule generation logic.
+  * The AI agent must NOT recommend, infer, or create business rules.
+  * Only technical DQ rules should be generated and processed.
+
+## Technical Rules Toggle Logic
+
+* If technical rules are enabled:
+
+  * Only technical metadata-driven rules should be generated.
+  * Examples:
+
+    * Null checks
+    * Duplicate checks
+    * Datatype validation
+    * Referential integrity
+    * Length validation
+    * Regex validation
+    * Freshness checks
+
+The backend orchestration should strictly respect the selected toggles.
+
+---
+
+# 3. Rules Manager Refactor
+
+Refactor the “Rules Manager” section into a more enterprise-grade approval workflow.
+
+## Separate Rule Categories
+
+After rules are generated, display them in two clearly separated sections:
+
+### Technical DQ Rules
+
+Examples:
+
+* Null validation
+* Duplicate detection
+* Datatype checks
+* Range validation
+
+### Business DQ Rules
+
+Examples:
+
+* Revenue cannot be negative
+* Order date must be before shipment date
+* Active customer must have active subscription
+
+The UI should visually distinguish these sections with:
+
+* Separate containers/cards
+* Headers
+* Different icons or labels
+* Clear categorization
+
+---
+
+# 4. Rule-Level Actions
+
+For every generated rule provide the following actions:
+
+## Select / Unselect
+
+* Checkbox or toggle to approve/reject the rule for final SQL generation.
+* Only selected rules should be included in downstream processing.
+
+## Delete
+
+* Allow users to permanently remove generated rules from the session/workflow.
+
+## Approval Workflow
+
+* SQL generation should happen ONLY after rule approval.
+* Unselected or deleted rules must NOT be included in:
+
+  * SQL generation
+  * Stored procedure generation
+  * Execution pipelines
+
+---
+
+# 5. Stored Procedure Generation Enhancement
+
+Currently the system creates multiple SQL blocks/procedures.
+
+Refactor this logic to generate:
+
+## Single Consolidated Stored Procedure
+
+* Generate ONE enterprise-grade stored procedure for all approved rules.
+* Prefer:
+
+  * UNION ALL–based aggregation approach
+  * Centralized validation framework
+  * Standardized output schema
+
+
+The stored procedure should:
+
+* Be modular and scalable
+* Support future rule extensibility
+* Avoid fragmented SQL generation
+* Improve maintainability and execution governance
+
+---
+
+# 6. Enterprise UI/UX Modernization
+
+Redesign the UI to feel more modern, clean, and enterprise-grade.
+
+## Requirements
+
+* Improve spacing, alignment, typography, and visual hierarchy.
+* Use professional dashboard aesthetics.
+* Add better cards, containers, and workflow layouts.
+* Improve responsiveness and usability.
+* Use subtle enterprise styling:
+
+  * Modern tables
+  * Soft shadows
+  * Better section grouping
+  * Consistent button styles
+  * Professional color palette
+  * Improved rule chips/tags
+  * Better loading states and transitions
+
+## Remove Vendor-Specific AI Branding
+
+* Remove any references in the UI to:
+
+  * Claude
+  * Gemini
+  * LLM vendor names
+  * Provider branding
+
+Replace with generic enterprise terminology such as:
+
+* AI Engine
+* Rule Intelligence Engine
+* DQ Recommendation Engine
+* AI Rule Generator
+
+The UI should look platform-neutral and production-ready.
+
+---
+
+# 7. Architecture Expectations
+
+While implementing:
+
+* Maintain clean separation between frontend and backend logic.
+* Ensure rule state management is scalable.
+* Preserve future extensibility for:
+
+  * Additional rule categories
+  * Multi-engine orchestration
+  * Workflow versioning
+  * Approval auditing
+  * Execution history
+
+Use enterprise engineering best practices throughout the implementation.
+
+Generate:
+
+1. Updated UI architecture
+2. Updated component structure
+3. Updated backend workflow logic
+4. Refactored SQL generation strategy
+5. Suggested UX improvements
+6. Relevant code changes
+7. Any required API contract updates

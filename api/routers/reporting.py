@@ -33,8 +33,8 @@ def _get_reporting_agent():
 async def get_table_health(
     _: str = Depends(verify_api_key),
 ) -> APIResponse:
-    agent = _get_reporting_agent()
     try:
+        agent = _get_reporting_agent()
         data = await agent.get_table_health()
         return APIResponse(success=True, data={"tables": data, "count": len(data)})
     except Exception as exc:
@@ -51,8 +51,8 @@ async def get_table_health(
 async def get_kpi(
     _: str = Depends(verify_api_key),
 ) -> APIResponse:
-    agent = _get_reporting_agent()
     try:
+        agent = _get_reporting_agent()
         data = await agent.get_executive_kpi()
         return APIResponse(success=True, data=data)
     except Exception as exc:
@@ -73,8 +73,8 @@ async def get_trends(
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days must be between 1 and 365")
 
-    agent = _get_reporting_agent()
     try:
+        agent = _get_reporting_agent()
         data = await agent.get_trend_data(days=days)
         return APIResponse(success=True, data={"trends": data, "days": days, "count": len(data)})
     except Exception as exc:

@@ -1,5 +1,5 @@
 """
-Agentic DQ Observability Platform — Operational Dashboard
+Enterprise Data Quality Observability Platform — Operational Dashboard
 Run: streamlit run ui/app.py
 """
 
@@ -8,532 +8,826 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import os
 import httpx
+import pandas as pd
 import streamlit as st
 from datetime import datetime
 
 # ── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="DQ Observability Platform",
-    page_icon="🔍",
+    page_icon="⬡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Shared state keys ──────────────────────────────────────────────────────────
+# ── Enterprise CSS ─────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    /* ── Global typography ─────────────────────────────────── */
+    html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
+
+    /* ── Sidebar ────────────────────────────────────────────── */
+    section[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
+    section[data-testid="stSidebar"] .stRadio > label { font-size: 0.9rem; font-weight: 600; color: #475569; }
+    section[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label { font-size: 0.88rem; color: #1e293b; }
+
+    /* ── Page header ────────────────────────────────────────── */
+    .page-header {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 0.25rem;
+        letter-spacing: -0.5px;
+    }
+    .page-sub {
+        font-size: 0.82rem;
+        color: #64748b;
+        margin-bottom: 1.5rem;
+    }
+
+    /* ── Section card ───────────────────────────────────────── */
+    .section-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    .section-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #1e293b;
+        margin-bottom: 0.75rem;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    /* ── Rule badges ────────────────────────────────────────── */
+    .badge {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 20px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+    }
+    .badge-tech  { background: #dbeafe; color: #1d4ed8; }
+    .badge-biz   { background: #ede9fe; color: #7c3aed; }
+    .badge-fail  { background: #fee2e2; color: #dc2626; }
+    .badge-warn  { background: #fef3c7; color: #d97706; }
+    .badge-info  { background: #dcfce7; color: #16a34a; }
+    .badge-pass  { background: #dcfce7; color: #16a34a; }
+
+    /* ── Workflow stepper ───────────────────────────────────── */
+    .step-done   { color: #16a34a; font-weight: 600; font-size: 0.82rem; }
+    .step-active { color: #2563eb; font-weight: 600; font-size: 0.82rem; }
+    .step-todo   { color: #94a3b8; font-size: 0.82rem; }
+
+    /* ── KPI metric overrides ───────────────────────────────── */
+    [data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 700; }
+    [data-testid="stMetricLabel"] { font-size: 0.78rem !important; color: #64748b; }
+
+    /* ── Hide Streamlit branding only — keep nav controls intact ── */
+    #MainMenu  { visibility: hidden; }
+    footer     { visibility: hidden; }
+    /* Hide the deploy/share toolbar buttons but NOT the entire header,
+       so the sidebar expand/collapse toggle keeps working              */
+    [data-testid="stToolbar"]    { display: none !important; }
+    [data-testid="stDecoration"] { display: none !important; }
+
+    /* ── Dataframe ──────────────────────────────────────────── */
+    .stDataFrame thead tr th {
+        background: #f8fafc !important;
+        color: #475569 !important;
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.4px !important;
+    }
+
+    /* ── Primary button ─────────────────────────────────────── */
+    .stButton > button[kind="primary"] {
+        background: #2563eb;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        padding: 0.45rem 1.25rem;
+    }
+    .stButton > button[kind="primary"]:hover { background: #1d4ed8; }
+
+    /* ── Info / warning boxes ───────────────────────────────── */
+    .stAlert { border-radius: 8px; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Constants ──────────────────────────────────────────────────────────────────
 API_URL = os.getenv("DQ_API_URL", "http://localhost:8000")
-API_KEY = os.getenv("API_KEY", "changeme")
+API_KEY = os.getenv("API_KEY", "rickytokens")
 _HEADERS = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 
+SEV_ICON = {"FAIL": "🔴", "WARN": "🟡", "INFO": "🟢", "PASS": "✅"}
+SEV_BADGE = {
+    "FAIL": "badge badge-fail",
+    "WARN": "badge badge-warn",
+    "INFO": "badge badge-info",
+    "PASS": "badge badge-pass",
+}
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-def api_get(path: str) -> dict:
+
+# ── API helpers ────────────────────────────────────────────────────────────────
+def _extract_error(exc: Exception) -> str:
+    if hasattr(exc, "response"):
+        try:
+            body = exc.response.json()
+            return body.get("detail") or body.get("error") or str(exc)
+        except Exception:
+            pass
+    return str(exc)
+
+
+def api_get(path: str, timeout: int = 60) -> dict:
     try:
-        r = httpx.get(f"{API_URL}{path}", headers=_HEADERS, timeout=15)
+        r = httpx.get(f"{API_URL}{path}", headers=_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": _extract_error(exc)}
 
 
-def api_post(path: str, body: dict) -> dict:
+def api_post(path: str, body: dict, timeout: int = 300) -> dict:
     try:
-        r = httpx.post(f"{API_URL}{path}", json=body, headers=_HEADERS, timeout=30)
+        r = httpx.post(f"{API_URL}{path}", json=body, headers=_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": _extract_error(exc)}
 
 
-def severity_badge(sev: str) -> str:
-    colors = {"FAIL": "#dc3545", "WARN": "#ffc107", "INFO": "#28a745", "PASS": "#28a745"}
-    return f'<span style="background:{colors.get(sev,"#6c757d")};color:white;padding:2px 8px;border-radius:3px;font-size:12px;font-weight:bold">{sev}</span>'
+def api_put(path: str, body: dict, timeout: int = 30) -> dict:
+    try:
+        r = httpx.put(f"{API_URL}{path}", json=body, headers=_HEADERS, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"success": False, "error": _extract_error(exc)}
+
+
+def api_delete(path: str, params: dict | None = None, timeout: int = 10) -> dict:
+    try:
+        r = httpx.delete(f"{API_URL}{path}", headers=_HEADERS, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"success": False, "error": _extract_error(exc)}
 
 
 # ── Sidebar navigation ─────────────────────────────────────────────────────────
-st.sidebar.image("https://img.icons8.com/color/96/database-restore.png", width=60)
-st.sidebar.title("DQ Platform")
-st.sidebar.markdown("---")
-page = st.sidebar.radio(
-    "Navigate",
-    ["🏠 Dashboard", "🔍 New DQ Workflow", "📋 Rules Manager", "✅ Approvals", "📊 Reports", "⚙️ Settings"],
-    label_visibility="collapsed",
-)
-st.sidebar.markdown("---")
-st.sidebar.caption(f"API: `{API_URL}`")
+with st.sidebar:
+    st.markdown("### ⬡ DQ Platform")
+    st.caption("Enterprise Data Quality")
+    st.divider()
+    page = st.radio(
+        "Navigation",
+        ["🏠 Dashboard", "🚀 New Workflow", "📋 Rules Manager", "✅ Approvals", "⚙️ Settings"],
+    )
+    st.divider()
+    if st.session_state.get("session_id"):
+        st.caption("Active session")
+        st.code(st.session_state.session_id[:30], language=None)
+    else:
+        st.caption("No active session")
+    st.caption(f"API: {API_URL}")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE: DASHBOARD
 # ══════════════════════════════════════════════════════════════════════
 if page == "🏠 Dashboard":
-    st.title("🔍 Data Quality Observability Dashboard")
-    st.caption(f"Last refreshed: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-
-    # ── KPI Metrics row ────────────────────────────────────────────────
-    col1, col2, col3, col4 = st.columns(4)
+    st.markdown('<div class="page-header">Data Quality Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">Last refreshed: {datetime.utcnow().strftime("%Y-%m-%d %H:%M")} UTC</div>',
+        unsafe_allow_html=True,
+    )
 
     kpi_resp = api_get("/api/v1/reporting/kpi")
     kpi = kpi_resp.get("data", {}) if kpi_resp.get("success") else {}
 
+    c1, c2, c3, c4 = st.columns(4)
     if kpi:
-        col1.metric("Overall Pass Rate", f"{kpi.get('pass_rate_pct', 0):.1f}%",
-                    delta=f"{kpi.get('pass_rate_pct', 0) - 80:.1f}% vs target")
-        col2.metric("Health Score", f"{kpi.get('health_score', 0):.0f}/100")
-        col3.metric("Critical Failures", str(kpi.get("critical_failures", 0)),
-                    delta_color="inverse")
-        col4.metric("Total Checks", str(kpi.get("total_checks", 0)))
+        c1.metric("Pass Rate", f"{kpi.get('pass_rate_pct', 0):.1f}%",
+                  delta=f"{kpi.get('pass_rate_pct', 0) - 80:.1f}% vs 80% target")
+        c2.metric("Health Score", f"{kpi.get('health_score', 0):.0f} / 100")
+        c3.metric("Critical Failures", str(kpi.get("critical_failures", 0)), delta_color="inverse")
+        c4.metric("Total Checks", str(kpi.get("total_checks", 0)))
     else:
-        for col, label, val in [
-            (col1, "Overall Pass Rate", "—"),
-            (col2, "Health Score", "—"),
-            (col3, "Critical Failures", "—"),
-            (col4, "Total Checks", "—"),
-        ]:
-            col.metric(label, val)
-        st.info("No KPI data available yet. Run a DQ workflow first.", icon="ℹ️")
+        for col, lbl in zip([c1, c2, c3, c4], ["Pass Rate", "Health Score", "Critical Failures", "Total Checks"]):
+            col.metric(lbl, "—")
+        st.info("No execution data yet. Complete a DQ workflow to populate this dashboard.", icon="ℹ️")
 
     st.divider()
-
-    # ── Table Health ───────────────────────────────────────────────────
     col_left, col_right = st.columns([3, 2])
 
     with col_left:
-        st.subheader("Table Health Scores")
+        st.markdown("**Table Health Scores**")
         health_resp = api_get("/api/v1/reporting/health")
         health_data = health_resp.get("data", {}).get("tables", []) if health_resp.get("success") else []
-
         if health_data:
-            import pandas as pd
-            df = pd.DataFrame(health_data)
-            if "health_score" in df.columns:
-                df = df.sort_values("health_score", ascending=True)
-
-            st.dataframe(
-                df[["table_name", "health_score", "pass_rate_pct", "failed", "critical_failures", "hours_since_last_run"]]
-                if all(c in df.columns for c in ["table_name", "health_score", "pass_rate_pct", "failed"])
-                else df,
-                use_container_width=True,
-                height=350,
-            )
+            df_h = pd.DataFrame(health_data)
+            if "health_score" in df_h.columns:
+                df_h = df_h.sort_values("health_score", ascending=True)
+            show_cols = [c for c in ["table_name", "health_score", "pass_rate_pct", "failed",
+                                      "critical_failures", "hours_since_last_run"] if c in df_h.columns]
+            st.dataframe(df_h[show_cols], use_container_width=True, height=300)
         else:
-            st.info("No table health data available.")
+            st.caption("No table health data available.")
 
     with col_right:
-        st.subheader("Pass Rate Trend")
+        st.markdown("**Pass Rate Trend (7 days)**")
         trend_resp = api_get("/api/v1/reporting/trends?days=7")
         trend_data = trend_resp.get("data", {}).get("trends", []) if trend_resp.get("success") else []
-
         if trend_data:
-            import pandas as pd
-            df_trend = pd.DataFrame(trend_data)
-            if "run_date" in df_trend.columns and "pass_rate_pct" in df_trend.columns:
-                df_trend["run_date"] = pd.to_datetime(df_trend["run_date"])
-                pivot = df_trend.groupby("run_date")["pass_rate_pct"].mean().reset_index()
+            df_t = pd.DataFrame(trend_data)
+            if "run_date" in df_t.columns and "pass_rate_pct" in df_t.columns:
+                df_t["run_date"] = pd.to_datetime(df_t["run_date"])
+                pivot = df_t.groupby("run_date")["pass_rate_pct"].mean().reset_index()
                 st.line_chart(pivot.set_index("run_date")["pass_rate_pct"])
-            else:
-                st.info("Trend data not in expected format.")
         else:
-            st.info("No trend data available yet.")
-
-    # ── Failed Rules ───────────────────────────────────────────────────
-    st.subheader("Active Failures")
+            st.caption("No trend data available yet.")
 
     if health_data:
         total_failed = sum(t.get("failed", 0) for t in health_data)
         if total_failed == 0:
-            st.success(f"✅ All checks passing across {len(health_data)} table(s).")
+            st.success(f"All checks passing across {len(health_data)} table(s).")
         else:
-            st.error(f"⚠️ {total_failed} active failure(s) across {len(health_data)} table(s).")
-    else:
-        st.caption("Run a DQ workflow to see failures here.")
+            st.error(f"{total_failed} active failure(s) across {len(health_data)} table(s).")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PAGE: NEW DQ WORKFLOW
+# PAGE: NEW WORKFLOW
 # ══════════════════════════════════════════════════════════════════════
-elif page == "🔍 New DQ Workflow":
-    st.title("🔍 Start New DQ Workflow")
-    st.markdown("Kick off a full metadata discovery and rule generation session.")
+elif page == "🚀 New Workflow":
+    st.markdown('<div class="page-header">New DQ Workflow</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-sub">Configure target tables and kick off rule generation.</div>',
+                unsafe_allow_html=True)
 
     if "session_id" not in st.session_state:
         st.session_state.session_id = None
     if "workflow_stage" not in st.session_state:
         st.session_state.workflow_stage = None
 
+    # ── Step 1: Discovery ──────────────────────────────────────────────
+    st.markdown("#### Step 1 — Configure Target Tables")
     with st.form("discovery_form"):
-        st.subheader("Step 1 — Configure Target Tables")
-        project_id = st.text_input("GCP Project ID", placeholder="my-gcp-project")
-        dataset_id = st.text_input("BigQuery Dataset", placeholder="my_dataset")
+        col_a, col_b = st.columns(2)
+        project_id = col_a.text_input("GCP Project ID", placeholder="my-gcp-project")
+        dataset_id = col_b.text_input("BigQuery Dataset", placeholder="my_dataset")
         table_names_raw = st.text_area(
             "Table Names (one per line or comma-separated)",
             placeholder="customers\norders\ntransactions",
+            height=80,
         )
         col1, col2 = st.columns(2)
-        include_tech = col1.checkbox("Generate Technical Rules", value=True)
-        include_biz = col2.checkbox("Generate Business Rules (Claude)", value=True)
-        submit_discovery = st.form_submit_button("🚀 Start Discovery", type="primary")
+        include_tech = col1.checkbox(
+            "Generate Technical Rules",
+            value=True,
+            help="Null checks, uniqueness, type validation, freshness, volume, etc.",
+        )
+        include_biz = col2.checkbox(
+            "Generate Business Rules",
+            value=True,
+            help="AI-inferred domain rules: cross-column constraints, SLA rules, business logic.",
+        )
+        if not include_biz:
+            st.caption(
+                "ℹ️ Business rule generation is disabled. "
+                "Only metadata-driven technical checks will be produced."
+            )
+        submit_discovery = st.form_submit_button("Run Metadata Discovery", type="primary")
 
     if submit_discovery:
         if not project_id or not dataset_id or not table_names_raw:
             st.error("All fields are required.")
         else:
             table_names = [t.strip() for t in table_names_raw.replace(",", "\n").splitlines() if t.strip()]
-            with st.spinner("Running metadata discovery..."):
+            with st.spinner("Scanning BigQuery schema and profiling tables..."):
                 resp = api_post("/api/v1/discovery/start", {
                     "project_id": project_id,
                     "dataset_id": dataset_id,
                     "table_names": table_names,
                 })
-
             if resp.get("success"):
                 data = resp["data"]
                 st.session_state.session_id = data["session_id"]
                 st.session_state.workflow_stage = "discovered"
-                st.success(f"✅ Discovery complete! Session: `{data['session_id']}`")
+                st.session_state.include_tech = include_tech
+                st.session_state.include_biz = include_biz
+                st.success(f"Discovery complete — session `{data['session_id']}`")
                 st.json(data)
             else:
                 st.error(f"Discovery failed: {resp.get('error', 'Unknown error')}")
 
-    if st.session_state.session_id and st.session_state.workflow_stage == "discovered":
+    # ── Step 2: Rule Generation ────────────────────────────────────────
+    if st.session_state.get("session_id") and st.session_state.get("workflow_stage") == "discovered":
         st.divider()
-        st.subheader("Step 2 — Generate DQ Rules")
+        st.markdown("#### Step 2 — Generate DQ Rules")
+        inc_t = st.session_state.get("include_tech", True)
+        inc_b = st.session_state.get("include_biz", True)
+        label_parts = []
+        if inc_t:
+            label_parts.append("technical")
+        if inc_b:
+            label_parts.append("AI business")
+        st.caption(f"Will generate: **{' + '.join(label_parts)} rules**")
 
-        if st.button("⚙️ Generate Rules", type="primary"):
-            with st.spinner("Generating rules (Claude is reasoning about your data)..."):
+        if st.button("Generate Rules", type="primary"):
+            with st.spinner("Rule Intelligence Engine analysing schema..."):
                 resp = api_post("/api/v1/rules/generate", {
                     "session_id": st.session_state.session_id,
-                    "include_technical": include_tech,
-                    "include_business": include_biz,
+                    "include_technical": inc_t,
+                    "include_business": inc_b,
                 })
-
             if resp.get("success"):
                 data = resp["data"]
                 st.session_state.workflow_stage = "rules_generated"
-                st.success(f"✅ {data.get('total_rules', 0)} rules generated!")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Technical Rules", data.get("technical_rules", 0))
-                col2.metric("Business Rules", data.get("business_rules", 0))
-                col3.metric("Total Rules", data.get("total_rules", 0))
-                st.info("👉 Go to **Rules Manager** to review and approve.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Technical Rules", data.get("technical_rules", 0))
+                c2.metric("Business Rules", data.get("business_rules", 0))
+                c3.metric("Total Rules", data.get("total_rules", 0))
+                st.success(f"{data.get('total_rules', 0)} rules generated.")
+                st.info("Go to **Rules Manager** to review, approve, or remove rules before submission.")
             else:
                 st.error(f"Rule generation failed: {resp.get('error', 'Unknown error')}")
-
-    if st.session_state.session_id:
-        st.sidebar.success(f"Active Session:\n`{st.session_state.session_id}`")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE: RULES MANAGER
 # ══════════════════════════════════════════════════════════════════════
 elif page == "📋 Rules Manager":
-    st.title("📋 DQ Rules Manager")
+    st.markdown('<div class="page-header">Rules Manager</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-sub">Review, select, and manage generated DQ rules before approval.</div>',
+        unsafe_allow_html=True,
+    )
 
     session_id = st.text_input(
         "Session ID",
         value=st.session_state.get("session_id", ""),
         placeholder="session_abc123",
     )
-
     if not session_id:
-        st.info("Enter a session ID to view and manage rules.")
+        st.info("Enter a session ID to manage rules.")
         st.stop()
 
     resp = api_get(f"/api/v1/rules/{session_id}")
-
     if not resp.get("success"):
         st.error(f"Error loading rules: {resp.get('error')}")
         st.stop()
 
-    rules_data = resp.get("data", {})
-    rules = rules_data.get("rules", [])
-
-    st.caption(f"Total rules: **{len(rules)}** | Session: `{session_id}`")
-
-    if not rules:
-        st.info("No rules found for this session.")
+    all_rules: list[dict] = resp.get("data", {}).get("rules", [])
+    if not all_rules:
+        st.info("No rules found for this session. Run rule generation first.")
         st.stop()
 
-    # ── Filters ────────────────────────────────────────────────────────
-    col1, col2, col3 = st.columns(3)
-    filter_sev = col1.multiselect("Severity", ["FAIL", "WARN", "INFO"], default=["FAIL", "WARN", "INFO"])
-    filter_cat = col2.multiselect(
-        "Category",
-        list({r["category"] for r in rules}),
-        default=list({r["category"] for r in rules}),
-    )
-    filter_active = col3.checkbox("Active only", value=True)
+    tech_rules = [r for r in all_rules if r.get("source") == "technical"]
+    biz_rules  = [r for r in all_rules if r.get("source") == "business"]
 
-    filtered = [
-        r for r in rules
-        if r.get("severity") in filter_sev
-        and r.get("category") in filter_cat
-        and (not filter_active or r.get("is_active", True))
-    ]
+    # ── Selection state ────────────────────────────────────────────────
+    sel_key = f"selections_{session_id}"
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = {r["rule_id"]: r.get("is_active", True) for r in all_rules}
 
-    st.markdown(f"Showing **{len(filtered)}** of {len(rules)} rules")
+    deleted_key = f"deleted_{session_id}"
+    if deleted_key not in st.session_state:
+        st.session_state[deleted_key] = set()
 
-    # ── Rule table ─────────────────────────────────────────────────────
-    import pandas as pd
-    df = pd.DataFrame(filtered)
-    if not df.empty:
-        display_cols = [c for c in ["rule_id", "rule_name", "category", "severity", "table", "column", "has_sql", "is_active"] if c in df.columns]
-        st.dataframe(df[display_cols], use_container_width=True, height=400)
+    def _render_rule_section(rules: list[dict], section_title: str, icon: str, badge_cls: str) -> None:
+        """Render a rule section with per-rule select/delete actions."""
+        visible = [r for r in rules if r["rule_id"] not in st.session_state[deleted_key]]
+        selected_count = sum(1 for r in visible if st.session_state[sel_key].get(r["rule_id"], True))
 
-    # ── Inline edit ────────────────────────────────────────────────────
+        st.markdown(
+            f'<div class="section-title">{icon} {section_title} '
+            f'<span class="badge {badge_cls}">{len(visible)} rules</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        if not visible:
+            st.caption("No rules in this category.")
+            return
+
+        # Quick-select controls
+        qc1, qc2, _ = st.columns([1, 1, 6])
+        if qc1.button("Select All", key=f"sel_all_{badge_cls}"):
+            for r in visible:
+                st.session_state[sel_key][r["rule_id"]] = True
+            st.rerun()
+        if qc2.button("Deselect All", key=f"desel_all_{badge_cls}"):
+            for r in visible:
+                st.session_state[sel_key][r["rule_id"]] = False
+            st.rerun()
+
+        # Per-rule rows
+        for rule in visible:
+            rid = rule["rule_id"]
+            sev = rule.get("severity", "INFO")
+            sev_icon = SEV_ICON.get(sev, "⚪")
+            col_check, col_name, col_cat, col_sev, col_col, col_sql, col_del = st.columns(
+                [0.04, 0.28, 0.14, 0.09, 0.14, 0.09, 0.06]
+            )
+            with col_check:
+                new_val = st.checkbox(
+                    "incl",
+                    value=st.session_state[sel_key].get(rid, True),
+                    key=f"cb_{rid}",
+                    label_visibility="collapsed",
+                )
+                st.session_state[sel_key][rid] = new_val
+            with col_name:
+                st.markdown(
+                    f'<span style="font-size:0.82rem;font-weight:{"600" if new_val else "400"};'
+                    f'color:{"#1e293b" if new_val else "#94a3b8"}">{rule["rule_name"]}</span>',
+                    unsafe_allow_html=True,
+                )
+                if rule.get("description"):
+                    st.caption(rule["description"][:70] + ("…" if len(rule.get("description", "")) > 70 else ""))
+            with col_cat:
+                st.caption(rule.get("category", "—"))
+            with col_sev:
+                st.markdown(
+                    f'<span class="badge {SEV_BADGE.get(sev, "badge")}">{sev_icon} {sev}</span>',
+                    unsafe_allow_html=True,
+                )
+            with col_col:
+                st.caption(rule.get("column") or "—")
+            with col_sql:
+                st.markdown(
+                    "✅" if rule.get("has_sql") else "⏳",
+                    unsafe_allow_html=True,
+                )
+            with col_del:
+                if st.button("🗑", key=f"del_{rid}", help="Remove this rule"):
+                    st.session_state[deleted_key].add(rid)
+                    st.session_state[sel_key].pop(rid, None)
+                    st.rerun()
+
+        st.caption(f"{selected_count} / {len(visible)} selected")
+
+    # ── Column headers ─────────────────────────────────────────────────
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([0.04, 0.28, 0.14, 0.09, 0.14, 0.09, 0.06])
+    for col, label in zip([h1, h2, h3, h4, h5, h6, h7],
+                          ["", "Rule", "Category", "Sev.", "Column", "SQL", ""]):
+        col.markdown(
+            f'<div style="font-size:0.72rem;font-weight:600;color:#64748b;text-transform:uppercase;'
+            f'letter-spacing:0.4px">{label}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Technical Rules ────────────────────────────────────────────────
+    with st.container():
+        _render_rule_section(tech_rules, "Technical DQ Rules", "🔧", "badge-tech")
+
     st.divider()
-    st.subheader("Edit a Rule")
 
-    rule_ids = [r["rule_id"] for r in filtered]
-    if rule_ids:
-        selected_id = st.selectbox("Select rule to edit", rule_ids)
-        selected = next((r for r in filtered if r["rule_id"] == selected_id), {})
+    # ── Business Rules ─────────────────────────────────────────────────
+    with st.container():
+        _render_rule_section(biz_rules, "Business DQ Rules", "💼", "badge-biz")
 
-        with st.form("edit_rule_form"):
-            new_severity = st.selectbox(
-                "Severity",
-                ["FAIL", "WARN", "INFO"],
-                index=["FAIL", "WARN", "INFO"].index(selected.get("severity", "WARN")),
-            )
-            new_threshold = st.slider(
-                "Threshold",
-                min_value=0.0, max_value=1.0,
-                value=float(selected.get("threshold", 0.0)),
-                step=0.01,
-            )
-            new_active = st.checkbox("Active", value=selected.get("is_active", True))
-            save_btn = st.form_submit_button("💾 Save Changes")
+    st.divider()
 
-        if save_btn:
-            upd_resp = httpx.put(
-                f"{API_URL}/api/v1/rules/{selected_id}",
-                json={"session_id": session_id, "severity": new_severity, "threshold": new_threshold, "is_active": new_active},
-                headers=_HEADERS,
-                timeout=10,
-            )
-            if upd_resp.status_code == 200:
-                st.success(f"✅ Rule `{selected_id}` updated.")
-                st.rerun()
-            else:
-                st.error(f"Update failed: {upd_resp.text}")
+    # ── Summary & Sync ─────────────────────────────────────────────────
+    all_visible = [r for r in all_rules if r["rule_id"] not in st.session_state[deleted_key]]
+    total_selected = sum(1 for r in all_visible if st.session_state[sel_key].get(r["rule_id"], True))
+
+    sum_c1, sum_c2 = st.columns([3, 1])
+    sum_c1.markdown(
+        f'<span style="font-size:0.9rem;font-weight:600;color:#1e293b">'
+        f'{total_selected} rules selected</span> '
+        f'<span style="font-size:0.82rem;color:#64748b">of {len(all_visible)} active</span>',
+        unsafe_allow_html=True,
+    )
+
+    if sum_c2.button("Save Selections →", type="primary", use_container_width=True):
+        errors = []
+        # Deactivate deleted rules
+        for rid in st.session_state[deleted_key]:
+            r = api_delete(f"/api/v1/rules/{rid}", params={"session_id": session_id})
+            if not r.get("success"):
+                errors.append(rid)
+
+        # Sync include/exclude state
+        for rule in all_visible:
+            rid = rule["rule_id"]
+            new_active = st.session_state[sel_key].get(rid, True)
+            if new_active != rule.get("is_active", True):
+                api_put(f"/api/v1/rules/{rid}", {"session_id": session_id, "is_active": new_active})
+
+        if errors:
+            st.warning(f"Some rules could not be removed: {errors}")
+        else:
+            st.success(f"Selections saved — {total_selected} rules will proceed to SQL generation.")
+            st.info("Go to **Approvals** to submit Checkpoint 1.")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE: APPROVALS
 # ══════════════════════════════════════════════════════════════════════
 elif page == "✅ Approvals":
-    st.title("✅ Human Approval Checkpoints")
-    st.markdown("Review and approve DQ rule sets and monitoring configurations before they go live.")
+    st.markdown('<div class="page-header">Approval Checkpoints</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-sub">Human-in-the-loop gates for rule approval and execution governance.</div>',
+        unsafe_allow_html=True,
+    )
 
     session_id = st.text_input(
         "Session ID",
         value=st.session_state.get("session_id", ""),
         placeholder="session_abc123",
     )
-
     if not session_id:
         st.info("Enter a session ID to manage approvals.")
         st.stop()
 
-    # Show current approval status
     status_resp = api_get(f"/api/v1/approvals/{session_id}")
-    if status_resp.get("success"):
-        data = status_resp["data"]
-        col1, col2 = st.columns(2)
-        col1.metric("Checkpoint 1 (Rules)", data.get("approval_1_status", "UNKNOWN"))
-        col2.metric("Checkpoint 2 (Monitoring)", data.get("approval_2_status", "UNKNOWN"))
+    appr_data   = status_resp.get("data", {}) if status_resp.get("success") else {}
+    cp1         = appr_data.get("approval_1_status", "pending")
+    cp2         = appr_data.get("approval_2_status", "pending")
+    cur_stage   = appr_data.get("current_stage", "init")
+
+    # ── Workflow stepper ───────────────────────────────────────────────
+    STAGES = [
+        ("Discovery", cur_stage not in ("init",)),
+        ("Rules Generated", cur_stage not in ("init", "metadata_discovery", "technical_rules", "business_rules")),
+        ("CP1 Approved", cp1 == "approved"),
+        ("SQL Generated", cp1 == "approved"),
+        ("CP2 Approved", cp2 == "approved"),
+        ("Complete", cur_stage == "complete"),
+    ]
+    cols = st.columns(len(STAGES))
+    for i, (col, (label, done)) in enumerate(zip(cols, STAGES)):
+        if done:
+            col.markdown(f'<div class="step-done">✓ {label}</div>', unsafe_allow_html=True)
+        elif i == next((j for j, (_, d) in enumerate(STAGES) if not d), len(STAGES)):
+            col.markdown(f'<div class="step-active">▶ {label}</div>', unsafe_allow_html=True)
+        else:
+            col.markdown(f'<div class="step-todo">○ {label}</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    # Show rules for review
+    # ══════════════════════════════════════════════════════════════════
+    # CHECKPOINT 1
+    # ══════════════════════════════════════════════════════════════════
+    status_label = {"approved": "✅ APPROVED", "rejected": "❌ REJECTED",
+                    "modified": "🔄 MODIFIED", "pending": "⏳ PENDING"}.get(cp1, "⏳ PENDING")
+    st.markdown(f"#### Checkpoint 1 — Rule Set Approval &nbsp; `{status_label}`",
+                unsafe_allow_html=True)
+
     rules_resp = api_get(f"/api/v1/rules/{session_id}")
-    if rules_resp.get("success"):
-        rules = rules_resp["data"].get("rules", [])
+    rules = rules_resp.get("data", {}).get("rules", []) if rules_resp.get("success") else []
+    active_rules = [r for r in rules if r.get("is_active", True)]
 
-        st.subheader(f"Checkpoint 1 — Review Rule Set ({len(rules)} rules)")
+    if rules:
+        tech_r = [r for r in active_rules if r.get("source") == "technical"]
+        biz_r  = [r for r in active_rules if r.get("source") == "business"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Active Rules", len(active_rules))
+        c2.metric("Technical", len(tech_r))
+        c3.metric("Business", len(biz_r))
 
-        tab_fail, tab_warn, tab_info = st.tabs(["🔴 FAIL Rules", "🟡 WARN Rules", "🟢 INFO Rules"])
+        with st.expander("Preview active rules"):
+            if active_rules:
+                df_r = pd.DataFrame(active_rules)
+                disp = [c for c in ["rule_name", "source", "category", "severity", "column", "has_sql"]
+                        if c in df_r.columns]
+                st.dataframe(df_r[disp], use_container_width=True, height=260)
+    else:
+        st.info("No rules found. Run rule generation first.")
 
-        for tab, sev in [(tab_fail, "FAIL"), (tab_warn, "WARN"), (tab_info, "INFO")]:
-            with tab:
-                filtered = [r for r in rules if r.get("severity") == sev]
-                if filtered:
-                    import pandas as pd
-                    df = pd.DataFrame(filtered)
-                    disp = [c for c in ["rule_id", "rule_name", "category", "table", "column", "threshold"] if c in df.columns]
-                    st.dataframe(df[disp], use_container_width=True, height=300)
+    if cp1 != "approved":
+        with st.form("cp1_form"):
+            approver_id = st.text_input("Approver ID / Email", placeholder="data-steward@company.com")
+            decision = st.radio("Decision", ["APPROVED", "REJECTED", "MODIFIED"],
+                                horizontal=True, key="cp1_dec")
+            comments = st.text_area("Comments", placeholder="Rules look correct for this dataset.",
+                                    key="cp1_comments")
+            submitted = st.form_submit_button("Submit Checkpoint 1", type="primary")
+
+        if submitted:
+            if not approver_id:
+                st.error("Approver ID is required.")
+            else:
+                with st.spinner(
+                    "Submitting approval and auto-generating SQL + consolidated stored procedure..."
+                    if decision == "APPROVED" else "Submitting..."
+                ):
+                    resp = api_post("/api/v1/approvals/submit", {
+                        "session_id": session_id,
+                        "stage": "approval_1",
+                        "status": decision.lower(),
+                        "approver_id": approver_id,
+                        "comments": comments,
+                        "rule_modifications": [],
+                    })
+                if resp.get("success"):
+                    d = resp.get("data", {})
+                    if decision == "APPROVED":
+                        st.success(
+                            "Checkpoint 1 approved. SQL generated and consolidated stored "
+                            "procedure created in BigQuery automatically."
+                        )
+                        st.info(d.get("next_action", ""))
+                    elif decision == "REJECTED":
+                        st.error("Checkpoint 1 rejected. Workflow halted.")
+                    else:
+                        st.warning("Sent back for modification.")
+                    st.rerun()
                 else:
-                    st.caption(f"No {sev} rules in this set.")
+                    st.error(f"Submission failed: {resp.get('error')}")
+    else:
+        st.success("Checkpoint 1 approved. SQL and consolidated stored procedure are ready.")
+        if active_rules:
+            sql_ready = sum(1 for r in active_rules if r.get("has_sql"))
+            st.caption(f"SQL generated for {sql_ready} / {len(active_rules)} active rules.")
 
-    # Approval form
     st.divider()
-    st.subheader("Submit Approval Decision")
 
-    with st.form("approval_form"):
-        stage = st.selectbox("Checkpoint", ["approval_1", "approval_2"])
-        approver_id = st.text_input("Your Email / ID", placeholder="data-steward@company.com")
-        decision = st.radio("Decision", ["APPROVED", "REJECTED", "MODIFIED"], horizontal=True)
-        comments = st.text_area("Comments", placeholder="Reviewed all rules. Adjusting email threshold to 0.98.")
-        submit_approval = st.form_submit_button("📝 Submit Decision", type="primary")
+    # ══════════════════════════════════════════════════════════════════
+    # CHECKPOINT 2
+    # ══════════════════════════════════════════════════════════════════
+    cp2_label = {"approved": "✅ APPROVED", "rejected": "❌ REJECTED",
+                 "modified": "🔄 MODIFIED", "pending": "⏳ PENDING"}.get(cp2, "⏳ PENDING")
+    st.markdown(f"#### Checkpoint 2 — Monitoring & Execution Approval &nbsp; `{cp2_label}`",
+                unsafe_allow_html=True)
 
-    if submit_approval:
-        if not approver_id:
-            st.error("Approver ID is required.")
-        else:
-            with st.spinner("Submitting approval..."):
-                resp = api_post("/api/v1/approvals/submit", {
-                    "session_id": session_id,
-                    "stage": stage,
-                    "status": decision,
-                    "approver_id": approver_id,
-                    "comments": comments,
-                    "rule_modifications": [],
-                })
+    if cp1 != "approved":
+        st.info("Complete Checkpoint 1 before proceeding.")
+    elif cp2 != "approved":
+        with st.form("cp2_form"):
+            approver_id2 = st.text_input("Approver ID / Email",
+                                         placeholder="data-steward@company.com", key="cp2_approver")
+            decision2 = st.radio("Decision", ["APPROVED", "REJECTED", "MODIFIED"],
+                                 horizontal=True, key="cp2_dec")
+            comments2 = st.text_area("Comments", placeholder="Execution schedule confirmed.",
+                                     key="cp2_comments")
+            submitted2 = st.form_submit_button("Submit Checkpoint 2", type="primary")
 
-            if resp.get("success"):
-                data = resp["data"]
-                if decision == "APPROVED":
-                    st.success(f"✅ {stage} approved by {approver_id}.")
-                    st.info(f"Next action: {data.get('next_action', '')}")
-                elif decision == "REJECTED":
-                    st.error(f"❌ {stage} rejected. Workflow halted.")
+        if submitted2:
+            if not approver_id2:
+                st.error("Approver ID is required.")
+            else:
+                with st.spinner("Submitting..."):
+                    resp2 = api_post("/api/v1/approvals/submit", {
+                        "session_id": session_id,
+                        "stage": "approval_2",
+                        "status": decision2.lower(),
+                        "approver_id": approver_id2,
+                        "comments": comments2,
+                        "rule_modifications": [],
+                    })
+                if resp2.get("success"):
+                    if decision2 == "APPROVED":
+                        st.success("Checkpoint 2 approved. Workflow complete.")
+                    elif decision2 == "REJECTED":
+                        st.error("Checkpoint 2 rejected.")
+                    else:
+                        st.warning("Sent back for modification.")
+                    st.rerun()
                 else:
-                    st.warning(f"🔄 {stage} sent back for modification.")
-                st.rerun()
-            else:
-                st.error(f"Approval submission failed: {resp.get('error')}")
+                    st.error(f"Submission failed: {resp2.get('error')}")
+    else:
+        st.success("Checkpoint 2 approved. Workflow complete.")
+        st.divider()
+        st.markdown("#### Run DQ Checks")
 
+        tab_exec, tab_dag = st.tabs(["▶ Execute Now", "📅 Schedule via Airflow / Cloud Composer"])
 
-# ══════════════════════════════════════════════════════════════════════
-# PAGE: REPORTS
-# ══════════════════════════════════════════════════════════════════════
-elif page == "📊 Reports":
-    st.title("📊 DQ Reporting & Analytics")
-
-    tab_kpi, tab_health, tab_trends, tab_freshness = st.tabs([
-        "Executive KPI", "Table Health", "Trend Analysis", "Freshness Report"
-    ])
-
-    # ── KPI Tab ────────────────────────────────────────────────────────
-    with tab_kpi:
-        st.subheader("Executive Data Quality KPI")
-        kpi_resp = api_get("/api/v1/reporting/kpi")
-
-        if kpi_resp.get("success") and kpi_resp.get("data"):
-            kpi = kpi_resp["data"]
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Checks", kpi.get("total_checks", 0))
-            col2.metric("Passed", kpi.get("passed_checks", 0))
-            col3.metric(
-                "Pass Rate",
-                f"{kpi.get('pass_rate_pct', 0):.1f}%",
-                delta=f"{kpi.get('pass_rate_pct', 0) - 80:.1f}% vs 80% target",
+        # ── Tab 1: Execute Now ─────────────────────────────────────────
+        with tab_exec:
+            st.caption(
+                "Calls the consolidated stored procedure directly and writes results to `dq_results`."
             )
-            col4.metric("Health Score", f"{kpi.get('health_score', 0):.0f}/100")
+            if st.button("Execute DQ Checks", type="primary", key="exec_now_btn"):
+                with st.spinner("Executing consolidated DQ stored procedure..."):
+                    exec_resp = api_post("/api/v1/sql/execute", {"session_id": session_id},
+                                         timeout=300)
+                if exec_resp.get("success"):
+                    d = exec_resp["data"]
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Total Rules", d.get("total_rules", 0))
+                    c2.metric("Passed", d.get("passed", 0))
+                    c3.metric("Failed", d.get("failed", 0))
+                    c4.metric("Pass Rate", f"{d.get('pass_rate', 0) * 100:.1f}%")
+                    st.success(
+                        f"Run complete — health score {d.get('health_score', 0):.0f}/100 "
+                        f"in {d.get('duration_seconds', 0):.1f}s"
+                    )
+                else:
+                    st.error(f"Execution failed: {exec_resp.get('error')}")
 
-            st.divider()
-            col5, col6 = st.columns(2)
-            col5.metric("Failed Checks", kpi.get("failed_checks", 0), delta_color="inverse")
-            col6.metric("Critical Failures", kpi.get("critical_failures", 0), delta_color="inverse")
-        else:
-            st.info("No KPI data yet. Execute a DQ run first.")
+        # ── Tab 2: Schedule via DAG ────────────────────────────────────
+        with tab_dag:
+            st.markdown(
+                "Generate an Airflow DAG that calls the consolidated stored procedure "
+                "on a cron schedule. Upload the generated file to your Cloud Composer "
+                "DAGs bucket to activate scheduling."
+            )
 
-    # ── Table Health Tab ───────────────────────────────────────────────
-    with tab_health:
-        st.subheader("Per-Table Health Scores")
-        health_resp = api_get("/api/v1/reporting/health")
+            col_sched, col_owner = st.columns(2)
+            schedule = col_sched.text_input(
+                "Cron Schedule",
+                value="0 6 * * *",
+                help="Standard cron: minute hour day month weekday. E.g. '0 6 * * *' = daily at 06:00.",
+            )
+            owner = col_owner.text_input("DAG Owner", value="data-quality")
 
-        if health_resp.get("success"):
-            tables = health_resp["data"].get("tables", [])
-            if tables:
-                import pandas as pd
-                df = pd.DataFrame(tables)
+            common_schedules = {
+                "Every day at 06:00": "0 6 * * *",
+                "Every hour": "0 * * * *",
+                "Every 6 hours": "0 */6 * * *",
+                "Every Monday 07:00": "0 7 * * 1",
+                "First of month 08:00": "0 8 1 * *",
+            }
+            quick = st.selectbox("Quick schedule picker", ["— custom —"] + list(common_schedules))
+            if quick != "— custom —":
+                schedule = common_schedules[quick]
+                st.caption(f"Selected cron: `{schedule}`")
 
-                # Health score bar chart
-                if "health_score" in df.columns and "table_name" in df.columns:
-                    chart_df = df[["table_name", "health_score"]].set_index("table_name")
-                    st.bar_chart(chart_df)
+            if st.button("Generate DAG", type="primary", key="gen_dag_btn"):
+                with st.spinner("Generating Airflow DAG..."):
+                    dag_resp = api_post("/api/v1/monitoring/generate-dag", {
+                        "session_id": session_id,
+                        "schedule": schedule,
+                        "owner": owner,
+                    })
 
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No health data available.")
-        else:
-            st.error(f"Failed to load health data: {health_resp.get('error')}")
-
-    # ── Trend Analysis Tab ─────────────────────────────────────────────
-    with tab_trends:
-        st.subheader("DQ Pass Rate Trends")
-        days = st.slider("Days to show", 7, 90, 30)
-        trend_resp = api_get(f"/api/v1/reporting/trends?days={days}")
-
-        if trend_resp.get("success"):
-            trends = trend_resp["data"].get("trends", [])
-            if trends:
-                import pandas as pd
-                df = pd.DataFrame(trends)
-                if "run_date" in df.columns and "pass_rate_pct" in df.columns:
-                    df["run_date"] = pd.to_datetime(df["run_date"])
-                    pivot = df.groupby(["run_date", "rule_type"])["pass_rate_pct"].mean().reset_index()
-                    chart_pivot = pivot.pivot(index="run_date", columns="rule_type", values="pass_rate_pct")
-                    st.line_chart(chart_pivot)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info(f"No trend data for the last {days} days.")
-        else:
-            st.error(f"Failed to load trends: {trend_resp.get('error')}")
-
-    # ── Freshness Tab ──────────────────────────────────────────────────
-    with tab_freshness:
-        st.subheader("Data Freshness Report")
-        st.info(
-            "This view shows freshness lag per table vs. SLA target. "
-            "Data is sourced from the `v_dq_freshness_report` BigQuery view."
-        )
-
-        # Would query freshness from BigQuery directly in a real deployment
-        st.caption("Connect to BigQuery to populate this view, or run a DQ workflow with freshness rules enabled.")
+                if dag_resp.get("success"):
+                    d = dag_resp["data"]
+                    st.success(
+                        f"DAG `{d['dag_id']}` generated — calls stored procedure "
+                        f"`{d['sp_name']}` on schedule `{d['schedule']}`"
+                    )
+                    st.code(d["dag_content"], language="python")
+                    st.download_button(
+                        label=f"Download {d['filename']}",
+                        data=d["dag_content"],
+                        file_name=d["filename"],
+                        mime="text/x-python",
+                    )
+                    st.markdown(
+                        "**Next steps:**\n"
+                        "1. Download the DAG file above\n"
+                        "2. Upload it to your Cloud Composer DAGs bucket: "
+                        "`gsutil cp {filename} gs://<composer-bucket>/dags/`\n"
+                        "3. The DAG will appear in Airflow and run on the configured schedule"
+                    )
+                else:
+                    st.error(f"DAG generation failed: {dag_resp.get('error')}")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE: SETTINGS
 # ══════════════════════════════════════════════════════════════════════
 elif page == "⚙️ Settings":
-    st.title("⚙️ Platform Settings")
+    st.markdown('<div class="page-header">Platform Settings</div>', unsafe_allow_html=True)
 
     with st.expander("API Connection", expanded=True):
-        new_url = st.text_input("API Base URL", value=API_URL)
-        new_key = st.text_input("API Key", value=API_KEY, type="password")
-
+        st.text_input("API Base URL", value=API_URL)
+        st.text_input("API Key", value=API_KEY, type="password")
         if st.button("Test Connection"):
             try:
-                r = httpx.get(f"{new_url}/health", headers={"X-API-Key": new_key}, timeout=5)
+                r = httpx.get(f"{API_URL}/health", headers=_HEADERS, timeout=5)
                 if r.status_code == 200:
-                    st.success(f"✅ Connected: {r.json()}")
+                    st.success(f"Connected — {r.json()}")
                 else:
-                    st.error(f"HTTP {r.status_code}: {r.text}")
+                    st.error(f"HTTP {r.status_code}")
             except Exception as exc:
                 st.error(f"Connection failed: {exc}")
 
-    with st.expander("Active Session"):
+    with st.expander("Session Management"):
         st.code(st.session_state.get("session_id") or "No active session")
         if st.button("Clear Session"):
-            st.session_state.session_id = None
-            st.session_state.workflow_stage = None
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
             st.rerun()
 
     with st.expander("About"):
         st.markdown("""
-        **Agentic DQ Observability Platform v1.0**
+        **Enterprise DQ Observability Platform v2.0**
 
-        - **AI Engine:** Claude API (`claude-sonnet-4-6`)
-        - **Data Warehouse:** Google BigQuery
-        - **Orchestration:** LangGraph multi-agent pipeline
-        - **API:** FastAPI + Pydantic v2
-        - **Dashboard:** Streamlit
+        | Component | Details |
+        |-----------|---------|
+        | AI Engine | Rule Intelligence Engine (generative model) |
+        | Data Warehouse | Google BigQuery |
+        | Orchestration | Multi-agent pipeline |
+        | API | FastAPI + Pydantic v2 |
+        | Dashboard | Streamlit |
+        | SP Strategy | Consolidated per-session stored procedure |
 
         Built for production data quality governance in enterprise environments.
         """)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -15,6 +17,7 @@ from prompts.sql_generation_agent import (
     SQL_REVIEW_PROMPT_V1,
 )
 from schemas.models import DQRule
+from tools.bigquery.client import BigQueryClient
 from tools.sql_tools.builder import SQLBuilder, get_sql_builder
 from tools.sql_tools.validator import validate_sql_syntax
 
@@ -187,6 +190,18 @@ class SQLGenerationAgent(BaseAgent):
                     ref_column=params.get("ref_column", rule.column_name),
                     severity=rule.severity.value,
                 )
+            elif cat == "schema_drift":
+                raw = params.get("baseline_columns_json", "[]")
+                baseline_cols = json.loads(raw) if isinstance(raw, str) else raw
+                return self._builder.build_schema_drift_check(
+                    run_id=run_id,
+                    rule_id=rule.rule_id,
+                    project=rule.project_id,
+                    dataset=rule.dataset_name,
+                    table=rule.table_name,
+                    baseline_columns=baseline_cols or [],
+                    severity=rule.severity.value,
+                )
         except Exception as exc:
             self._log.warning("template_sql_failed", rule_id=rule.rule_id, error=str(exc))
 
@@ -210,3 +225,116 @@ class SQLGenerationAgent(BaseAgent):
         except Exception as exc:
             self._log.error("claude_sql_generation_failed", rule_id=rule.rule_id, error=str(exc))
             return None
+
+    async def persist_rules_to_bigquery(
+        self,
+        rules: list[DQRule],
+        session_id: str,
+        rule_set_version_id: str,
+        bq_client: BigQueryClient,
+    ) -> None:
+        """Insert rule configs (with generated SQL) into dq_rule_config."""
+        table_id = f"{self._dq_project}.{self._dq_dataset}.dq_rule_config"
+        now = datetime.utcnow().isoformat()
+        rows = [
+            {
+                "rule_id": r.rule_id,
+                "rule_set_version_id": rule_set_version_id,
+                "session_id": session_id,
+                "rule_name": r.rule_name,
+                "rule_category": r.rule_category.value,
+                "description": r.description,
+                "severity": r.severity.value,
+                "threshold": r.threshold,
+                "execution_frequency": r.execution_frequency or "daily",
+                "project_id": r.project_id,
+                "dataset_name": r.dataset_name,
+                "table_name": r.table_name,
+                "column_name": r.column_name,
+                "generated_sql": r.generated_sql,
+                "parameters_json": json.dumps(r.parameters or {}, default=str),
+                "rationale": r.rationale,
+                "is_active": r.is_active,
+                "created_at": now,
+                "updated_at": now,
+            }
+            for r in rules
+        ]
+        try:
+            await bq_client.insert_rows(table_id, rows)
+            self._log.info("rules_persisted_to_bq", count=len(rows), table=table_id)
+        except Exception as exc:
+            self._log.error("rules_persist_failed", error=str(exc))
+
+    async def create_consolidated_stored_procedure(
+        self,
+        rules: list[DQRule],
+        bq_client: BigQueryClient,
+        session_id: str,
+    ) -> str:
+        """Create ONE consolidated BigQuery stored procedure for all approved/active rules.
+
+        The procedure accepts `run_id STRING` and executes every rule's INSERT
+        sequentially in a single BEGIN...END block, giving enterprise-grade governance:
+        one artifact per session, version-controlled, auditable.
+
+        Returns the procedure name, or empty string on failure.
+        """
+        active = [r for r in rules if r.generated_sql and r.is_active]
+        if not active:
+            self._log.warning("no_active_rules_for_sp", session_id=session_id)
+            return ""
+
+        sp_name = _safe_sp_name(session_id)
+        statements = []
+        for rule in active:
+            # Replace @run_id query-parameter syntax with the procedure IN parameter
+            body = rule.generated_sql.replace("@run_id", "run_id").rstrip(";").strip()
+            # Indent the body so it sits cleanly inside the BEGIN block
+            indented = "\n".join(
+                ("      " + line) if line.strip() else line
+                for line in body.splitlines()
+            )
+            cat = rule.rule_category.value.upper()
+            # Wrap in BEGIN...EXCEPTION so one failing rule never aborts the rest
+            statements.append(
+                f"  -- [{cat}] {rule.rule_name}\n"
+                f"  BEGIN\n"
+                f"{indented};\n"
+                f"  EXCEPTION WHEN ERROR THEN\n"
+                f"    -- rule execution failed; continuing with remaining rules\n"
+                f"  END;"
+            )
+
+        rule_block = "\n\n".join(statements)
+        sp_ddl = (
+            f"CREATE OR REPLACE PROCEDURE\n"
+            f"  `{self._dq_project}.{self._dq_dataset}.{sp_name}`(IN run_id STRING)\n"
+            f"BEGIN\n"
+            f"  -- ================================================================\n"
+            f"  -- Consolidated DQ Validation Procedure\n"
+            f"  -- Session  : {session_id}\n"
+            f"  -- Rules    : {len(active)}\n"
+            f"  -- Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            f"  -- Each rule is wrapped in BEGIN...EXCEPTION so failures are isolated\n"
+            f"  -- ================================================================\n\n"
+            f"{rule_block}\n"
+            f"END"
+        )
+
+        try:
+            await bq_client.execute_dml(sp_ddl)
+            self._log.info("consolidated_sp_created", sp=sp_name, rules=len(active))
+            return sp_name
+        except Exception as exc:
+            # Surface the error clearly so it appears in the API response
+            self._log.error("consolidated_sp_failed", session_id=session_id, error=str(exc))
+            raise RuntimeError(
+                f"Failed to create consolidated stored procedure `{sp_name}`: {exc}"
+            ) from exc
+
+
+def _safe_sp_name(identifier: str) -> str:
+    """Return a BigQuery-safe stored procedure name."""
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", identifier)
+    return f"sp_dq_{safe}"

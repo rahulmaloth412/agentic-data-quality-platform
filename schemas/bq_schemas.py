@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.dq_results` (
     execution_duration_seconds  FLOAT64,
     query_executed              STRING,
     error_message               STRING,
-    created_at                  TIMESTAMP    NOT NULL    DEFAULT CURRENT_TIMESTAMP()
+    created_at                  TIMESTAMP    NOT NULL
 )
 PARTITION BY DATE(execution_time)
 CLUSTER BY table_name, rule_type, severity;

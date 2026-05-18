@@ -22,7 +22,7 @@ WITH source_stats AS (
     {% if partition_filter %}WHERE {{ partition_filter }}{% endif %}
 )
 SELECT
-    '{{ run_id }}'                              AS run_id,
+    @run_id                                     AS run_id,
     '{{ rule_id }}'                             AS rule_id,
     '{{ project_id }}'                          AS project_id,
     '{{ dataset_name }}'                        AS dataset_name,

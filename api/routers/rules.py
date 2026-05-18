@@ -75,12 +75,14 @@ async def get_rules(
         {
             "rule_id": r.rule_id,
             "rule_name": r.rule_name,
+            "source": "business" if r.rule_id.startswith("BRUL_") else "technical",
             "category": r.rule_category.value,
             "severity": r.severity.value,
             "threshold": r.threshold,
             "table": r.table_name,
             "column": r.column_name,
             "description": r.description,
+            "rationale": r.rationale,
             "has_sql": bool(r.generated_sql),
             "is_active": r.is_active,
         }

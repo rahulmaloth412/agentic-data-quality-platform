@@ -94,6 +94,7 @@ async def execute_sql(
             session_id=session_id,
             rules=state.rule_set.all_rules,
             rule_set_version_id=state.rule_set.rule_set_version_id,
+            consolidated_sp_name=state.consolidated_sp_name,
         )
         state.run_results = run_result
         _sessions[session_id] = state

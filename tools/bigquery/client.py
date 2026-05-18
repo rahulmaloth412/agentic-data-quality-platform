@@ -42,8 +42,13 @@ class BigQueryClient:
     def __init__(self, project_id: Optional[str] = None) -> None:
         settings = get_settings()
         self._project_id = project_id or settings.gcp.project_id
-        self._client = bigquery.Client(project=self._project_id)
+        self._client: Optional[bigquery.Client] = None  # lazy — avoids auth at import time
         self._log = logger.bind(project=self._project_id)
+
+    def _get_client(self) -> bigquery.Client:
+        if self._client is None:
+            self._client = bigquery.Client(project=self._project_id)
+        return self._client
 
     @property
     def project_id(self) -> str:
@@ -82,7 +87,7 @@ class BigQueryClient:
         self._log.info("executing_query", sql_preview=sql[:120])
 
         def _run() -> list[dict[str, Any]]:
-            job = self._client.query(sql, job_config=job_config, timeout=timeout)
+            job = self._get_client().query(sql, job_config=job_config, timeout=timeout)
             result = job.result(timeout=timeout)
             return [dict(row) for row in result]
 
@@ -104,7 +109,7 @@ class BigQueryClient:
         self._log.info("executing_dml", sql_preview=sql[:120])
 
         def _run() -> int:
-            job = self._client.query(sql, job_config=job_config, timeout=timeout)
+            job = self._get_client().query(sql, job_config=job_config, timeout=timeout)
             job.result(timeout=timeout)
             return job.num_dml_affected_rows or 0
 
@@ -122,8 +127,8 @@ class BigQueryClient:
         self._log.info("inserting_rows", table=table_id, count=len(rows))
 
         def _run() -> list[dict[str, Any]]:
-            table = self._client.get_table(table_id)
-            errors = self._client.insert_rows_json(table, rows, skip_invalid_rows=skip_invalid)
+            table = self._get_client().get_table(table_id)
+            errors = self._get_client().insert_rows_json(table, rows, skip_invalid_rows=skip_invalid)
             return errors
 
         errors = await self._run_sync(_run)
@@ -136,7 +141,7 @@ class BigQueryClient:
         """Return True if the table exists."""
         full_id = f"{project}.{dataset}.{table}"
         try:
-            await self._run_sync(self._client.get_table, full_id)
+            await self._run_sync(self._get_client().get_table, full_id)
             return True
         except gcp_exceptions.NotFound:
             return False
@@ -161,7 +166,7 @@ class BigQueryClient:
             table.clustering_fields = clustering_fields
 
         def _run() -> None:
-            self._client.create_table(table, exists_ok=True)
+            self._get_client().create_table(table, exists_ok=True)
 
         await self._run_sync(_run)
         self._log.info("table_ensured", table=table_id)
@@ -169,7 +174,7 @@ class BigQueryClient:
     async def get_table_row_count(self, table_id: str) -> int:
         """Return the approximate row count for a table."""
         try:
-            table = await self._run_sync(self._client.get_table, table_id)
+            table = await self._run_sync(self._get_client().get_table, table_id)
             return table.num_rows or 0
         except gcp_exceptions.NotFound:
             return 0
@@ -179,7 +184,7 @@ class BigQueryClient:
         job_config = QueryJobConfig(dry_run=True, use_query_cache=False)
 
         def _run() -> dict[str, Any]:
-            job = self._client.query(sql, job_config=job_config)
+            job = self._get_client().query(sql, job_config=job_config)
             return {
                 "valid": True,
                 "bytes_processed": job.total_bytes_processed,
@@ -202,7 +207,8 @@ class BigQueryClient:
         return "STRING"
 
     async def close(self) -> None:
-        await self._run_sync(self._client.close)
+        if self._client is not None:
+            await self._run_sync(self._client.close)
 
 
 def get_bq_client(project_id: Optional[str] = None) -> BigQueryClient:

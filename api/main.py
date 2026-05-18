@@ -12,6 +12,8 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
+from google.auth.exceptions import DefaultCredentialsError, TransportError
+
 from api.routers import approvals, discovery, monitoring, reporting, rules, sql
 from configs.logging_config import configure_logging
 from configs.settings import get_settings
@@ -44,7 +46,7 @@ def create_app() -> FastAPI:
         title="Agentic DQ Observability Platform",
         description=(
             "Production-grade AI-powered Data Quality & Observability Platform "
-            "using Claude API, BigQuery, and multi-agent orchestration."
+            "using Gemini API, BigQuery, and multi-agent orchestration."
         ),
         version="1.0.0",
         docs_url="/docs",
@@ -71,6 +73,36 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["Health"])
     async def health_check():
         return {"status": "healthy", "version": "1.0.0"}
+
+    @app.exception_handler(DefaultCredentialsError)
+    async def gcp_credentials_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.warning("gcp_credentials_missing", path=request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "success": False,
+                "error": "GCP credentials not configured",
+                "detail": (
+                    "Google Cloud credentials are required for this endpoint. "
+                    "Run: gcloud auth application-default login"
+                ),
+            },
+        )
+
+    @app.exception_handler(TransportError)
+    async def gcp_transport_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.warning("gcp_transport_error", path=request.url.path, error=str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "success": False,
+                "error": "GCP credentials not configured",
+                "detail": (
+                    "Google Cloud credentials are required for this endpoint. "
+                    "Run: gcloud auth application-default login"
+                ),
+            },
+        )
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
