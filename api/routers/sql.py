@@ -60,6 +60,54 @@ async def generate_sql(
 
 
 @router.post(
+    "/rebuild-sp",
+    response_model=APIResponse,
+    summary="Rebuild consolidated stored procedure",
+    description=(
+        "Regenerates SQL for all approved rules using the current generator and "
+        "redeploys the consolidated stored procedure in BigQuery."
+    ),
+)
+async def rebuild_sp(
+    body: dict,
+    _: str = Depends(verify_api_key),
+) -> APIResponse:
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+
+    state = _sessions.get(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    from schemas.models import ApprovalStatus
+    if state.approval_1_status != ApprovalStatus.APPROVED:
+        raise HTTPException(status_code=400, detail="Checkpoint 1 must be approved before rebuilding the SP.")
+
+    orchestrator = _get_orchestrator()
+    try:
+        state = await orchestrator.run_stage_sql_generation(state)
+        _sessions[session_id] = state
+
+        rules = state.rule_set.all_rules if state.rule_set else []
+        with_sql = sum(1 for r in rules if r.generated_sql)
+
+        return APIResponse(
+            success=True,
+            data={
+                "session_id": session_id,
+                "sp_name": state.consolidated_sp_name,
+                "rules_with_sql": with_sql,
+                "total_rules": len(rules),
+            },
+            message=f"Stored procedure `{state.consolidated_sp_name}` rebuilt with updated SQL.",
+        )
+    except Exception as exc:
+        logger.error("rebuild_sp_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
     "/execute",
     response_model=APIResponse,
     status_code=status.HTTP_202_ACCEPTED,

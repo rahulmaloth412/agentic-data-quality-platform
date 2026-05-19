@@ -321,9 +321,6 @@ class DQSQLGenerator:
         src = _table_ref(rule.project_id, rule.dataset_name, rule.table_name)
         where = f" WHERE {partition_filter}" if partition_filter else ""
 
-        observed_expr = (
-            "CAST(ROUND(SAFE_DIVIDE(null_count, NULLIF(total_count, 0)) * 100, 4) AS STRING)"
-        )
         threshold_pct = round(threshold * 100, 2)
         stats_subq = (
             f"(SELECT COUNT(*) AS total_count, "
@@ -339,8 +336,11 @@ class DQSQLGenerator:
                 f"CASE WHEN SAFE_DIVIDE(null_count, NULLIF(total_count, 0)) "
                 f"<= {threshold} THEN 'PASS' ELSE 'FAIL' END"
             ),
-            observed_expr=observed_expr,
-            expected_expr=_sql_str(f"<= {threshold_pct}%"),
+            observed_expr=(
+                "CONCAT(CAST(null_count AS STRING), ' of ', "
+                "CAST(total_count AS STRING), ' rows are null')"
+            ),
+            expected_expr=_sql_str(f"null rate <= {threshold_pct}%"),
             threshold_expr=_sql_str(threshold),
             failure_count_expr="null_count",
         )
@@ -358,17 +358,52 @@ class DQSQLGenerator:
         where = f" WHERE {partition_filter}" if partition_filter else ""
 
         if len(columns) == 1:
-            distinct_expr = f"COUNT(DISTINCT {_quote_ident(columns[0])})"
+            col_q = _quote_ident(columns[0])
+            distinct_expr = f"COUNT(DISTINCT {col_q})"
+            # Collect up to 5 actual duplicate values in a single pass via ARRAY_AGG
+            dup_sample_expr = (
+                f"ARRAY_TO_STRING("
+                f"ARRAY_AGG(DISTINCT CASE WHEN _cnt > 1 THEN CAST({col_q} AS STRING) END "
+                f"IGNORE NULLS LIMIT 5), ', ')"
+            )
+            from_inner = (
+                f"(SELECT {col_q}, COUNT(*) OVER (PARTITION BY {col_q}) AS _cnt, "
+                f"COUNT(*) AS total_count "
+                f"FROM {src}{where})"
+            )
+            stats_subq = (
+                f"(SELECT COUNT(*) AS total_count, {distinct_expr} AS distinct_count, "
+                f"{dup_sample_expr} AS sample_values "
+                f"FROM {src}{where})"
+            )
+            # simpler: use a correlated subquery for dup samples (one extra scan, limited)
+            dup_subq = (
+                f"(SELECT STRING_AGG(v, ', ') FROM ("
+                f"SELECT DISTINCT CAST({col_q} AS STRING) AS v "
+                f"FROM {src}{where} GROUP BY {col_q} HAVING COUNT(*) > 1 LIMIT 5))"
+            )
+            stats_subq = (
+                f"(SELECT COUNT(*) AS total_count, {distinct_expr} AS distinct_count, "
+                f"{dup_subq} AS sample_values "
+                f"FROM {src}{where})"
+            )
         else:
             concat = " , '|' , ".join(
                 f"CAST({_quote_ident(c)} AS STRING)" for c in columns
             )
-            distinct_expr = f"COUNT(DISTINCT CONCAT({concat}))"
-
-        stats_subq = (
-            f"(SELECT COUNT(*) AS total_count, {distinct_expr} AS distinct_count "
-            f"FROM {src}{where})"
-        )
+            key_expr = f"CONCAT({concat})"
+            distinct_expr = f"COUNT(DISTINCT {key_expr})"
+            dup_subq = (
+                f"(SELECT STRING_AGG(k, ', ') FROM ("
+                f"SELECT {key_expr} AS k "
+                f"FROM {src}{where} GROUP BY {', '.join(str(i+1) for i in range(len(columns)))} "
+                f"HAVING COUNT(*) > 1 LIMIT 5))"
+            )
+            stats_subq = (
+                f"(SELECT COUNT(*) AS total_count, {distinct_expr} AS distinct_count, "
+                f"{dup_subq} AS sample_values "
+                f"FROM {src}{where})"
+            )
 
         return self._build_select(
             rule,
@@ -377,7 +412,12 @@ class DQSQLGenerator:
             status_expr=(
                 "CASE WHEN total_count = distinct_count THEN 'PASS' ELSE 'FAIL' END"
             ),
-            observed_expr="CAST(total_count - distinct_count AS STRING)",
+            observed_expr=(
+                "CONCAT(CAST(total_count - distinct_count AS STRING), ' duplicate(s)'"
+                ", CASE WHEN total_count > distinct_count "
+                "AND sample_values IS NOT NULL AND sample_values != '' "
+                "THEN CONCAT(' — e.g. [', sample_values, ']') ELSE '' END)"
+            ),
             expected_expr=_sql_str("0 duplicates"),
             threshold_expr=_sql_str(0.0),
             failure_count_expr="total_count - distinct_count",
@@ -419,16 +459,29 @@ class DQSQLGenerator:
             fail_cond = (
                 f"{_quote_ident(column)} IS NOT NULL AND (" + " OR ".join(conds) + ")"
             )
-            expected_label = f"min={params.get('min_value')}, max={params.get('max_value')}"
+            parts = []
+            if params.get("has_min"):
+                parts.append(f">= {params['min_value']}")
+            if params.get("has_max"):
+                parts.append(f"<= {params['max_value']}")
+            expected_label = " and ".join(parts)
         elif params.get("fail_condition"):
             fail_cond = params["fail_condition"]
             expected_label = params.get("expected_label", "validity passes")
         else:
             raise _UnsupportedRule("validity rule has no recognizable parameters")
 
+        # Collect up to 5 actual bad column values in a correlated subquery (one extra scan)
+        sample_subq = (
+            f"(SELECT STRING_AGG(DISTINCT CAST({_quote_ident(column)} AS STRING), ', ') "
+            f"FROM (SELECT {_quote_ident(column)} FROM {src}{where} "
+            f"WHERE {fail_cond} LIMIT 5))"
+        )
+
         stats_subq = (
             f"(SELECT COUNT(*) AS total_count, "
-            f"COUNTIF({fail_cond}) AS failure_count "
+            f"COUNTIF({fail_cond}) AS failure_count, "
+            f"{sample_subq} AS sample_values "
             f"FROM {src}{where})"
         )
 
@@ -441,11 +494,14 @@ class DQSQLGenerator:
                 f"<= {threshold_pct} THEN 'PASS' ELSE 'FAIL' END"
             ),
             observed_expr=(
-                "CAST(ROUND(SAFE_DIVIDE(failure_count, NULLIF(total_count, 0)) "
-                "* 100, 4) AS STRING)"
+                "CONCAT(CAST(failure_count AS STRING), ' of ', "
+                "CAST(total_count AS STRING), ' rows invalid'"
+                ", CASE WHEN failure_count > 0 "
+                "AND sample_values IS NOT NULL AND sample_values != '' "
+                "THEN CONCAT(' — e.g. [', sample_values, ']') ELSE '' END)"
             ),
             expected_expr=_sql_str(expected_label),
-            threshold_expr=_sql_str(threshold_pct),
+            threshold_expr=_sql_str(f"<= {threshold_pct} failure rate"),
             failure_count_expr="failure_count",
         )
 
@@ -458,9 +514,11 @@ class DQSQLGenerator:
         max_lag_hours = float(params.get("max_lag_hours", 24.0))
         src = _table_ref(rule.project_id, rule.dataset_name, rule.table_name)
 
+        # Pull max timestamp in same scan — shows exact last-record time alongside lag
         stats_subq = (
             f"(SELECT COUNT(*) AS total_count, "
-            f"TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX({_quote_ident(ts_col)}), HOUR) AS lag_hours "
+            f"TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX({_quote_ident(ts_col)}), HOUR) AS lag_hours, "
+            f"FORMAT_TIMESTAMP('%Y-%m-%d %H:%M UTC', MAX({_quote_ident(ts_col)})) AS last_ts "
             f"FROM {src})"
         )
 
@@ -472,9 +530,12 @@ class DQSQLGenerator:
                 f"CASE WHEN lag_hours <= {max_lag_hours} OR lag_hours IS NULL "
                 f"THEN 'PASS' ELSE 'FAIL' END"
             ),
-            observed_expr="CAST(lag_hours AS STRING)",
-            expected_expr=_sql_str(f"<= {max_lag_hours}h"),
-            threshold_expr=_sql_str(max_lag_hours),
+            observed_expr=(
+                "CONCAT(CAST(lag_hours AS STRING), ' hrs behind"
+                " (last: ', COALESCE(last_ts, 'no data'), ')')"
+            ),
+            expected_expr=_sql_str(f"<= {max_lag_hours} hours"),
+            threshold_expr=_sql_str(str(max_lag_hours)),
             failure_count_expr=(
                 f"CASE WHEN lag_hours > {max_lag_hours} THEN 1 ELSE 0 END"
             ),
@@ -534,13 +595,21 @@ class DQSQLGenerator:
         src = _table_ref(rule.project_id, rule.dataset_name, rule.table_name)
         ref = _table_ref(ref_project, ref_dataset, ref_table)
 
+        col_q = _quote_ident(column)
+        ref_col_q = _quote_ident(ref_column)
+        orphan_cond = f"s.{col_q} IS NOT NULL AND r.{ref_col_q} IS NULL"
+
+        # Single JOIN pass: aggregate counts and sample orphaned FK values together
         stats_subq = (
             f"(SELECT COUNT(*) AS total_count, "
-            f"COUNTIF(s.{_quote_ident(column)} IS NOT NULL "
-            f"AND r.{_quote_ident(ref_column)} IS NULL) AS failure_count "
+            f"COUNTIF({orphan_cond}) AS failure_count, "
+            f"ARRAY_TO_STRING("
+            f"ARRAY_AGG(DISTINCT CASE WHEN {orphan_cond} "
+            f"THEN CAST(s.{col_q} AS STRING) END IGNORE NULLS LIMIT 5), ', '"
+            f") AS sample_values "
             f"FROM {src} s "
             f"LEFT JOIN {ref} r "
-            f"ON s.{_quote_ident(column)} = r.{_quote_ident(ref_column)})"
+            f"ON s.{col_q} = r.{ref_col_q})"
         )
 
         return self._build_select(
@@ -548,7 +617,12 @@ class DQSQLGenerator:
             run_id_ref=run_id_ref,
             from_clause=f"{stats_subq} AS stats",
             status_expr="CASE WHEN failure_count = 0 THEN 'PASS' ELSE 'FAIL' END",
-            observed_expr="CAST(failure_count AS STRING)",
+            observed_expr=(
+                "CONCAT(CAST(failure_count AS STRING), ' orphaned FK(s)'"
+                ", CASE WHEN failure_count > 0 "
+                "AND sample_values IS NOT NULL AND sample_values != '' "
+                "THEN CONCAT(' — e.g. [', sample_values, ']') ELSE '' END)"
+            ),
             expected_expr=_sql_str(f"all FKs present in {ref_table}"),
             threshold_expr=_sql_str(0.0),
             failure_count_expr="failure_count",
@@ -630,11 +704,11 @@ class DQSQLGenerator:
                 f"<= {threshold_pct} THEN 'PASS' ELSE 'FAIL' END"
             ),
             observed_expr=(
-                "CAST(ROUND(SAFE_DIVIDE(failure_count, NULLIF(total_count, 0)) "
-                "* 100, 4) AS STRING)"
+                "CONCAT(CAST(failure_count AS STRING), ' of ', "
+                "CAST(total_count AS STRING), ' rows fail')"
             ),
             expected_expr=_sql_str(params.get("expected_label", "row condition holds")),
-            threshold_expr=_sql_str(threshold_pct),
+            threshold_expr=_sql_str(f"<= {threshold_pct} failure rate"),
             failure_count_expr="failure_count",
         )
 

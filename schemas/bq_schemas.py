@@ -432,13 +432,14 @@ latest_freshness AS (
 SELECT
     fr.table_name,
     fr.execution_time AS last_checked_at,
-    fr.observed_value AS current_lag_hours,
+    fr.observed_value AS current_lag,
     fr.threshold_value AS sla_max_lag_hours,
     fr.status AS sla_status,
     fr.severity,
     CASE
         WHEN fr.status = 'FAIL' THEN 'SLA_BREACH'
-        WHEN CAST(fr.observed_value AS FLOAT64) > CAST(fr.threshold_value AS FLOAT64) * 0.8
+        WHEN SAFE_CAST(REGEXP_EXTRACT(fr.observed_value, r'^(\\d+)') AS FLOAT64)
+             > SAFE_CAST(fr.threshold_value AS FLOAT64) * 0.8
             THEN 'AT_RISK'
         ELSE 'HEALTHY'
     END AS freshness_health
