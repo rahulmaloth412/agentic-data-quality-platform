@@ -30,11 +30,26 @@ async def lifespan(app: FastAPI):
     tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
     trace.set_tracer_provider(tracer_provider)
 
-    logger.info(
-        "application_startup",
-        environment=settings.environment,
-        version="1.0.0",
-    )
+    logger.info("application_startup", environment=settings.environment, version="1.0.0")
+
+    if settings.gcp.project_id and settings.gcp.dq_dataset:
+        try:
+            from tools.bigquery.client import get_bq_client
+            from tools.bigquery.setup import ensure_dq_tables, ensure_dq_views
+
+            bq = get_bq_client()
+            table_results = await ensure_dq_tables(bq, settings.gcp.project_id, settings.gcp.dq_dataset)
+            view_results = await ensure_dq_views(bq, settings.gcp.project_id, settings.gcp.dq_dataset)
+            logger.info(
+                "bq_infrastructure_ready",
+                tables_ok=sum(table_results.values()),
+                views_ok=sum(view_results.values()),
+            )
+        except Exception as exc:
+            logger.warning("bq_setup_skipped", error=str(exc))
+    else:
+        logger.warning("bq_setup_skipped", reason="GCP_PROJECT_ID or GCP_DQ_DATASET not configured")
+
     yield
     logger.info("application_shutdown")
 

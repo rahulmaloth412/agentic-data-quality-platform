@@ -110,6 +110,29 @@ class ReportingAgent:
             self._log.error("trend_query_failed", error=str(exc))
             return []
 
+    async def get_failed_rules(self) -> list[dict[str, Any]]:
+        """Query the failed rules view (last 7 days, deduplicated to latest failure per rule)."""
+        sql = f"SELECT * FROM `{self._dq_project}.{self._dq_dataset}.v_dq_failed_rules` ORDER BY severity DESC, execution_time DESC LIMIT 500"
+        try:
+            return await self._bq_client.execute_query(sql)
+        except Exception as exc:
+            self._log.error("failed_rules_query_failed", error=str(exc))
+            return []
+
+    async def get_freshness_report(self) -> list[dict[str, Any]]:
+        """Query the freshness report view."""
+        sql = f"SELECT * FROM `{self._dq_project}.{self._dq_dataset}.v_dq_freshness_report` ORDER BY table_name"
+        try:
+            return await self._bq_client.execute_query(sql)
+        except Exception as exc:
+            self._log.error("freshness_query_failed", error=str(exc))
+            return []
+
+    async def setup_views(self) -> dict[str, bool]:
+        """Create or replace all reporting views. Returns per-view success map."""
+        from tools.bigquery.setup import ensure_dq_views
+        return await ensure_dq_views(self._bq_client, self._dq_project, self._dq_dataset)
+
     @staticmethod
     def _view_description(view_name: str) -> str:
         descriptions = {

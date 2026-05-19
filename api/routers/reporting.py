@@ -80,3 +80,56 @@ async def get_trends(
     except Exception as exc:
         logger.error("trend_query_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/failed-rules",
+    response_model=APIResponse,
+    summary="Active failures",
+    description="Return latest active DQ failures from v_dq_failed_rules (last 7 days).",
+)
+async def get_failed_rules(_: str = Depends(verify_api_key)) -> APIResponse:
+    try:
+        agent = _get_reporting_agent()
+        data = await agent.get_failed_rules()
+        return APIResponse(success=True, data={"rules": data, "count": len(data)})
+    except Exception as exc:
+        logger.error("failed_rules_query_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/freshness",
+    response_model=APIResponse,
+    summary="Freshness report",
+    description="Return per-table freshness lag vs. SLA from v_dq_freshness_report.",
+)
+async def get_freshness(_: str = Depends(verify_api_key)) -> APIResponse:
+    try:
+        agent = _get_reporting_agent()
+        data = await agent.get_freshness_report()
+        return APIResponse(success=True, data={"tables": data, "count": len(data)})
+    except Exception as exc:
+        logger.error("freshness_query_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/setup-views",
+    response_model=APIResponse,
+    summary="Create / refresh reporting views",
+    description="Idempotently create or replace all v_dq_* reporting views in BigQuery.",
+)
+async def setup_views(_: str = Depends(verify_api_key)) -> APIResponse:
+    try:
+        agent = _get_reporting_agent()
+        results = await agent.setup_views()
+        ok = sum(results.values())
+        return APIResponse(
+            success=True,
+            data={"views": results, "created": ok, "total": len(results)},
+            message=f"{ok}/{len(results)} views created successfully",
+        )
+    except Exception as exc:
+        logger.error("setup_views_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

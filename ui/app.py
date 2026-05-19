@@ -84,6 +84,11 @@ st.markdown("""
     .badge-info  { background: #dcfce7; color: #16a34a; }
     .badge-pass  { background: #dcfce7; color: #16a34a; }
 
+    /* ── Health pill ────────────────────────────────────────── */
+    .health-healthy  { background: #dcfce7; color: #15803d; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+    .health-at-risk  { background: #fef3c7; color: #b45309; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+    .health-breach   { background: #fee2e2; color: #dc2626; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+
     /* ── Workflow stepper ───────────────────────────────────── */
     .step-done   { color: #16a34a; font-weight: 600; font-size: 0.82rem; }
     .step-active { color: #2563eb; font-weight: 600; font-size: 0.82rem; }
@@ -96,8 +101,6 @@ st.markdown("""
     /* ── Hide Streamlit branding only — keep nav controls intact ── */
     #MainMenu  { visibility: hidden; }
     footer     { visibility: hidden; }
-    /* Hide the deploy/share toolbar buttons but NOT the entire header,
-       so the sidebar expand/collapse toggle keeps working              */
     [data-testid="stToolbar"]    { display: none !important; }
     [data-testid="stDecoration"] { display: none !important; }
 
@@ -195,7 +198,7 @@ with st.sidebar:
     st.divider()
     page = st.radio(
         "Navigation",
-        ["🏠 Dashboard", "🚀 New Workflow", "📋 Rules Manager", "✅ Approvals", "⚙️ Settings"],
+        ["🚀 New Workflow", "📋 Rules Manager", "✅ Approvals", "📊 Observability", "⚙️ Settings"],
     )
     st.divider()
     if st.session_state.get("session_id"):
@@ -207,72 +210,9 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PAGE: DASHBOARD
-# ══════════════════════════════════════════════════════════════════════
-if page == "🏠 Dashboard":
-    st.markdown('<div class="page-header">Data Quality Dashboard</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="page-sub">Last refreshed: {datetime.utcnow().strftime("%Y-%m-%d %H:%M")} UTC</div>',
-        unsafe_allow_html=True,
-    )
-
-    kpi_resp = api_get("/api/v1/reporting/kpi")
-    kpi = kpi_resp.get("data", {}) if kpi_resp.get("success") else {}
-
-    c1, c2, c3, c4 = st.columns(4)
-    if kpi:
-        c1.metric("Pass Rate", f"{kpi.get('pass_rate_pct', 0):.1f}%",
-                  delta=f"{kpi.get('pass_rate_pct', 0) - 80:.1f}% vs 80% target")
-        c2.metric("Health Score", f"{kpi.get('health_score', 0):.0f} / 100")
-        c3.metric("Critical Failures", str(kpi.get("critical_failures", 0)), delta_color="inverse")
-        c4.metric("Total Checks", str(kpi.get("total_checks", 0)))
-    else:
-        for col, lbl in zip([c1, c2, c3, c4], ["Pass Rate", "Health Score", "Critical Failures", "Total Checks"]):
-            col.metric(lbl, "—")
-        st.info("No execution data yet. Complete a DQ workflow to populate this dashboard.", icon="ℹ️")
-
-    st.divider()
-    col_left, col_right = st.columns([3, 2])
-
-    with col_left:
-        st.markdown("**Table Health Scores**")
-        health_resp = api_get("/api/v1/reporting/health")
-        health_data = health_resp.get("data", {}).get("tables", []) if health_resp.get("success") else []
-        if health_data:
-            df_h = pd.DataFrame(health_data)
-            if "health_score" in df_h.columns:
-                df_h = df_h.sort_values("health_score", ascending=True)
-            show_cols = [c for c in ["table_name", "health_score", "pass_rate_pct", "failed",
-                                      "critical_failures", "hours_since_last_run"] if c in df_h.columns]
-            st.dataframe(df_h[show_cols], use_container_width=True, height=300)
-        else:
-            st.caption("No table health data available.")
-
-    with col_right:
-        st.markdown("**Pass Rate Trend (7 days)**")
-        trend_resp = api_get("/api/v1/reporting/trends?days=7")
-        trend_data = trend_resp.get("data", {}).get("trends", []) if trend_resp.get("success") else []
-        if trend_data:
-            df_t = pd.DataFrame(trend_data)
-            if "run_date" in df_t.columns and "pass_rate_pct" in df_t.columns:
-                df_t["run_date"] = pd.to_datetime(df_t["run_date"])
-                pivot = df_t.groupby("run_date")["pass_rate_pct"].mean().reset_index()
-                st.line_chart(pivot.set_index("run_date")["pass_rate_pct"])
-        else:
-            st.caption("No trend data available yet.")
-
-    if health_data:
-        total_failed = sum(t.get("failed", 0) for t in health_data)
-        if total_failed == 0:
-            st.success(f"All checks passing across {len(health_data)} table(s).")
-        else:
-            st.error(f"{total_failed} active failure(s) across {len(health_data)} table(s).")
-
-
-# ══════════════════════════════════════════════════════════════════════
 # PAGE: NEW WORKFLOW
 # ══════════════════════════════════════════════════════════════════════
-elif page == "🚀 New Workflow":
+if page == "🚀 New Workflow":
     st.markdown('<div class="page-header">New DQ Workflow</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Configure target tables and kick off rule generation.</div>',
                 unsafe_allow_html=True)
@@ -557,7 +497,6 @@ elif page == "📋 Rules Manager":
                         f"Custom rule `{resp['data']['rule_id']}` added. "
                         "Refresh the page to see it in the rule list."
                     )
-                    # Reset selection state so the new rule appears
                     st.session_state.pop(sel_key, None)
                     st.session_state.pop(deleted_key, None)
                     st.rerun()
@@ -578,13 +517,11 @@ elif page == "📋 Rules Manager":
 
     if sum_c2.button("Save Selections →", type="primary", use_container_width=True):
         errors = []
-        # Deactivate deleted rules
         for rid in st.session_state[deleted_key]:
             r = api_delete(f"/api/v1/rules/{rid}", params={"session_id": session_id})
             if not r.get("success"):
                 errors.append(rid)
 
-        # Sync include/exclude state
         for rule in all_visible:
             rid = rule["rule_id"]
             new_active = st.session_state[sel_key].get(rid, True)
@@ -743,6 +680,7 @@ elif page == "✅ Approvals":
                         f"Run complete — health score {d.get('health_score', 0):.0f}/100 "
                         f"in {d.get('duration_seconds', 0):.1f}s"
                     )
+                    st.info("View results in the **Observability** dashboard.")
                 else:
                     st.error(f"Execution failed: {exec_resp.get('error')}")
 
@@ -804,6 +742,171 @@ elif page == "✅ Approvals":
                     )
                 else:
                     st.error(f"DAG generation failed: {dag_resp.get('error')}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAGE: OBSERVABILITY DASHBOARD
+# ══════════════════════════════════════════════════════════════════════
+elif page == "📊 Observability":
+    st.markdown('<div class="page-header">Observability Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="page-sub">Live results from BigQuery views — refreshed {datetime.utcnow().strftime("%Y-%m-%d %H:%M")} UTC</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Toolbar ───────────────────────────────────────────────────────
+    col_refresh, col_setup, col_days, _ = st.columns([1, 1.4, 1.2, 4])
+    if col_refresh.button("Refresh", use_container_width=True):
+        st.rerun()
+    if col_setup.button("Create / Refresh Views", use_container_width=True):
+        with st.spinner("Creating reporting views in BigQuery..."):
+            setup_resp = api_post("/api/v1/reporting/setup-views", {})
+        if setup_resp.get("success"):
+            d = setup_resp.get("data", {})
+            st.success(f"{d.get('created', 0)}/{d.get('total', 0)} views created successfully.")
+        else:
+            st.error(f"View setup failed: {setup_resp.get('error')}")
+        st.rerun()
+    trend_days = col_days.selectbox("Trend window", [7, 14, 30], index=2, label_visibility="collapsed")
+
+    st.divider()
+
+    # ── KPI Row ───────────────────────────────────────────────────────
+    kpi_resp = api_get("/api/v1/reporting/kpi")
+    kpi = kpi_resp.get("data", {}) if kpi_resp.get("success") else {}
+
+    c1, c2, c3, c4 = st.columns(4)
+    if kpi:
+        pass_rate = kpi.get("pass_rate_pct", 0)
+        health    = kpi.get("health_score", 0)
+        critical  = kpi.get("critical_failures", 0)
+        total     = kpi.get("total_checks", 0)
+
+        c1.metric("Pass Rate", f"{pass_rate:.1f}%", delta=f"{pass_rate - 80:.1f}% vs 80% target")
+        c2.metric(
+            "Health Score",
+            f"{health:.0f} / 100",
+            delta_color="normal" if health >= 80 else "inverse",
+        )
+        c3.metric("Critical Failures", str(critical), delta_color="inverse" if critical > 0 else "off")
+        c4.metric("Total Checks", str(total))
+    else:
+        for col, lbl in zip([c1, c2, c3, c4], ["Pass Rate", "Health Score", "Critical Failures", "Total Checks"]):
+            col.metric(lbl, "—")
+        st.info(
+            "No execution data yet. Run DQ checks from the **Approvals** page to populate this dashboard.",
+            icon="ℹ️",
+        )
+
+    st.divider()
+
+    # ── Table Health + Trend ──────────────────────────────────────────
+    col_health, col_trend = st.columns([3, 2])
+
+    with col_health:
+        st.markdown("**Table Health Scores** — from `v_dq_table_health`")
+        health_resp = api_get("/api/v1/reporting/health")
+        health_data = health_resp.get("data", {}).get("tables", []) if health_resp.get("success") else []
+        if health_data:
+            df_h = pd.DataFrame(health_data)
+            if "health_score" in df_h.columns:
+                df_h = df_h.sort_values("health_score", ascending=True)
+            show_cols = [c for c in [
+                "table_name", "health_score", "pass_rate_pct",
+                "total_checks", "passed", "failed",
+                "critical_failures", "hours_since_last_run",
+            ] if c in df_h.columns]
+            st.dataframe(df_h[show_cols], use_container_width=True, height=280)
+
+            total_failed = sum(t.get("failed", 0) for t in health_data)
+            if total_failed == 0:
+                st.success(f"All checks passing across {len(health_data)} table(s).")
+            else:
+                st.error(f"{total_failed} active failure(s) across {len(health_data)} table(s).")
+        else:
+            st.caption("No table health data. Views may need to be created or DQ checks haven't run yet.")
+
+    with col_trend:
+        st.markdown(f"**Pass Rate Trend ({trend_days}d)** — from `v_dq_trend_analysis`")
+        trend_resp = api_get(f"/api/v1/reporting/trends?days={trend_days}")
+        trend_data = trend_resp.get("data", {}).get("trends", []) if trend_resp.get("success") else []
+        if trend_data:
+            df_t = pd.DataFrame(trend_data)
+            if "run_date" in df_t.columns and "pass_rate_pct" in df_t.columns:
+                df_t["run_date"] = pd.to_datetime(df_t["run_date"])
+                pivot = df_t.groupby("run_date")["pass_rate_pct"].mean().reset_index()
+                st.line_chart(pivot.set_index("run_date")["pass_rate_pct"], height=260)
+        else:
+            st.caption("No trend data available yet.")
+
+    st.divider()
+
+    # ── Active Failures ────────────────────────────────────────────────
+    st.markdown("**Active Failures (last 7 days)** — from `v_dq_failed_rules`")
+    failed_resp = api_get("/api/v1/reporting/failed-rules")
+    failed_data = failed_resp.get("data", {}).get("rules", []) if failed_resp.get("success") else []
+
+    if failed_data:
+        df_f = pd.DataFrame(failed_data)
+        show_f = [c for c in [
+            "severity", "table_name", "column_name", "rule_type", "rule_id",
+            "observed_value", "expected_value", "failure_count",
+            "hours_open", "execution_time",
+        ] if c in df_f.columns]
+
+        # Colour-code severity column if present
+        def _sev_style(val: str) -> str:
+            colours = {"FAIL": "background-color:#fee2e2;color:#dc2626",
+                       "WARN": "background-color:#fef3c7;color:#d97706"}
+            return colours.get(val, "")
+
+        if "severity" in df_f.columns:
+            st.dataframe(
+                df_f[show_f].style.applymap(_sev_style, subset=["severity"]),
+                use_container_width=True,
+                height=300,
+            )
+        else:
+            st.dataframe(df_f[show_f], use_container_width=True, height=300)
+
+        crit = sum(1 for r in failed_data if r.get("severity") == "FAIL")
+        warns = sum(1 for r in failed_data if r.get("severity") == "WARN")
+        st.caption(f"{len(failed_data)} open failure(s) — {crit} critical, {warns} warnings")
+    else:
+        st.success("No active failures in the last 7 days.")
+
+    st.divider()
+
+    # ── Freshness Report ───────────────────────────────────────────────
+    st.markdown("**Data Freshness** — from `v_dq_freshness_report`")
+    fresh_resp = api_get("/api/v1/reporting/freshness")
+    fresh_data = fresh_resp.get("data", {}).get("tables", []) if fresh_resp.get("success") else []
+
+    if fresh_data:
+        df_fr = pd.DataFrame(fresh_data)
+        show_fr = [c for c in [
+            "table_name", "freshness_health", "sla_status",
+            "current_lag_hours", "sla_max_lag_hours", "last_checked_at",
+        ] if c in df_fr.columns]
+
+        def _fresh_style(val: str) -> str:
+            colours = {
+                "HEALTHY": "background-color:#dcfce7;color:#15803d",
+                "AT_RISK": "background-color:#fef3c7;color:#b45309",
+                "SLA_BREACH": "background-color:#fee2e2;color:#dc2626",
+            }
+            return colours.get(val, "")
+
+        if "freshness_health" in df_fr.columns:
+            st.dataframe(
+                df_fr[show_fr].style.applymap(_fresh_style, subset=["freshness_health"]),
+                use_container_width=True,
+                height=220,
+            )
+        else:
+            st.dataframe(df_fr[show_fr], use_container_width=True, height=220)
+    else:
+        st.caption("No freshness data available yet.")
 
 
 # ══════════════════════════════════════════════════════════════════════
