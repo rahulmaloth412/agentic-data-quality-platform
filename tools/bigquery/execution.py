@@ -43,7 +43,7 @@ async def ensure_dq_infrastructure(
     for table_key in ("dq_results", "dq_rule_config"):
         ddl = format_ddl(CREATE_TABLE_SQLS[table_key], project, dataset)
         try:
-            await client.execute_dml(ddl)
+            await client.execute_ddl(ddl)
             log.info("table_ensured", table=table_key)
         except Exception as exc:
             raise RuntimeError(
@@ -73,8 +73,6 @@ async def execute_dq_rule(
     start = time.monotonic()
     try:
         log.info("executing_dq_rule")
-        # run_id is a named parameter (@run_id) in the INSERT SQL — injected here so
-        # the same generated SQL works across multiple execution runs without regeneration
         await client.execute_dml(sql, params={"run_id": run_id})
         duration = time.monotonic() - start
         log.info("dq_rule_executed", duration=round(duration, 3))
@@ -83,7 +81,11 @@ async def execute_dq_rule(
     except Exception as exc:
         duration = time.monotonic() - start
         log.error("dq_rule_execution_failed", error=str(exc))
-        return _build_result(rule, run_id, "ERROR", error=str(exc), duration=duration)
+        error_result = _build_result(rule, run_id, "ERROR", error=str(exc)[:500], duration=duration)
+        # Persist the ERROR result so it appears in get_run_summary counts
+        if dq_project and dq_dataset:
+            await _insert_error_result(client, error_result, dq_project, dq_dataset)
+        return error_result
 
 
 async def execute_dq_ruleset(
@@ -197,6 +199,47 @@ async def get_run_summary(
         "pass_rate": round(pass_rate, 4),
         "health_score": round(health_score, 2),
     }
+
+
+async def _insert_error_result(
+    client: BigQueryClient,
+    result: dict[str, Any],
+    project: str,
+    dataset: str,
+) -> None:
+    """Insert a single error result row into dq_results via a direct INSERT statement."""
+    now = datetime.utcnow().isoformat()
+    sql = f"""
+    INSERT INTO `{project}.{dataset}.dq_results`
+      (run_id, rule_id, project_id, dataset_name, table_name, column_name,
+       rule_type, severity, status, observed_value, expected_value, threshold_value,
+       failure_count, execution_time, execution_duration_seconds,
+       query_executed, error_message, created_at)
+    VALUES (
+      @run_id, @rule_id, @project_id, @dataset_name, @table_name, @column_name,
+      @rule_type, @severity, @status, NULL, NULL, @threshold_value,
+      NULL, CURRENT_TIMESTAMP(), @duration,
+      NULL, @error_message, CURRENT_TIMESTAMP()
+    )
+    """
+    params = {
+        "run_id": result.get("run_id", ""),
+        "rule_id": result.get("rule_id", ""),
+        "project_id": result.get("project_id", project),
+        "dataset_name": result.get("dataset_name", dataset),
+        "table_name": result.get("table_name", ""),
+        "column_name": result.get("column_name") or "",
+        "rule_type": result.get("rule_type", ""),
+        "severity": result.get("severity", "INFO"),
+        "status": "ERROR",
+        "threshold_value": str(result.get("threshold_value", "")),
+        "duration": result.get("execution_duration_seconds") or 0.0,
+        "error_message": (result.get("error_message") or "")[:500],
+    }
+    try:
+        await client.execute_dml(sql, params=params)
+    except Exception as exc:
+        logger.warning("error_result_insert_failed", rule_id=result.get("rule_id"), error=str(exc))
 
 
 def _build_result(

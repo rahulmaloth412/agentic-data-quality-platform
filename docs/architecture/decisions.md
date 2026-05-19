@@ -26,11 +26,30 @@
 
 ---
 
-## ADR-004: Jinja2 + Claude SQL Generation Hybrid
+## ADR-004: Programmatic SQL Generation with Single-Procedure Deployment
 
-**Decision:** Use Jinja2 templates as the primary SQL generation path with Claude as a fallback for complex rules.
+**Decision:** Generate DQ SQL programmatically (one builder method per
+`RuleCategory`) and deploy all rules for a session as a single
+`CREATE OR REPLACE PROCEDURE` that executes one `INSERT` containing every
+rule's `SELECT` joined by `UNION ALL`. AI is used only as a fallback for
+rules the deterministic builder cannot render.
 
-**Rationale:** Template-based SQL is deterministic, testable, and fast. Claude fallback handles complex business rules that don't fit standard templates. This hybrid approach maximizes correctness while minimizing API costs.
+**Rationale:**
+- One uniform output row shape (the `dq_results` schema) lets every rule be
+  expressed as a single `SELECT … FROM <subquery>` block. Combining them
+  with `UNION ALL` requires no per-rule INSERT or per-rule
+  `BEGIN…EXCEPTION` wrapping.
+- One DDL deploys the whole rule set; one `CALL` executes the whole run.
+  This is faster, cheaper, and easier to audit than the previous
+  per-rule-per-INSERT approach.
+- Pure Python builders are easier to test, diff, and extend than 9 Jinja2
+  template files; adding a new rule category means adding one method to
+  `DQSQLGenerator`, not a new template + new SQLBuilder method + new
+  per-rule dispatch branch.
+
+**Supersedes:** the previous Jinja2 + Claude hybrid in `sql_templates/`.
+The Jinja templates and the old `SQLBuilder` class were removed in this
+ADR.
 
 ---
 

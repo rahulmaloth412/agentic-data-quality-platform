@@ -501,6 +501,69 @@ elif page == "📋 Rules Manager":
 
     st.divider()
 
+    # ── Add Custom SQL Rule ────────────────────────────────────────────
+    st.divider()
+    with st.expander("➕ Add Custom SQL Rule"):
+        st.caption(
+            "Write your own BigQuery SQL validation. "
+            "Use `@run_id` in your SELECT to pass the execution run ID. "
+            "Your SQL must INSERT into `dq_results` or be a SELECT that the platform wraps."
+        )
+        with st.form("custom_rule_form"):
+            cr_c1, cr_c2 = st.columns(2)
+            cr_name = cr_c1.text_input("Rule Name *", placeholder="Revenue must be non-negative")
+            cr_table = cr_c2.text_input("Table Name", placeholder="orders")
+            cr_c3, cr_c4, cr_c5 = st.columns(3)
+            cr_cat = cr_c3.selectbox("Category", ["validity", "completeness", "uniqueness",
+                                                   "integrity", "freshness", "volume", "consistency"])
+            cr_sev = cr_c4.selectbox("Severity", ["FAIL", "WARN", "INFO"])
+            cr_col = cr_c5.text_input("Column (optional)", placeholder="amount")
+            cr_desc = st.text_input("Description", placeholder="Checks that revenue is always >= 0")
+            cr_sql = st.text_area(
+                "Custom SQL *",
+                height=160,
+                placeholder=(
+                    "INSERT INTO `{project}.{dq_dataset}.dq_results`\n"
+                    "  (run_id, rule_id, project_id, dataset_name, table_name, column_name,\n"
+                    "   rule_type, severity, status, observed_value, expected_value,\n"
+                    "   threshold_value, failure_count, execution_time, created_at)\n"
+                    "SELECT\n"
+                    "  @run_id, 'CUST_xxxx', 'project', 'dataset', 'orders', 'amount',\n"
+                    "  'validity', 'FAIL',\n"
+                    "  CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END,\n"
+                    "  CAST(COUNT(*) AS STRING), '0', '0',\n"
+                    "  COUNT(*), CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()\n"
+                    "FROM `project.dataset.orders` WHERE amount < 0"
+                ),
+            )
+            add_btn = st.form_submit_button("Add Custom Rule", type="primary")
+
+        if add_btn:
+            if not cr_name or not cr_sql:
+                st.error("Rule Name and Custom SQL are required.")
+            else:
+                resp = api_post("/api/v1/rules/add-custom", {
+                    "session_id": session_id,
+                    "rule_name": cr_name,
+                    "category": cr_cat,
+                    "severity": cr_sev,
+                    "column_name": cr_col or None,
+                    "table_name": cr_table,
+                    "description": cr_desc,
+                    "custom_sql": cr_sql,
+                })
+                if resp.get("success"):
+                    st.success(
+                        f"Custom rule `{resp['data']['rule_id']}` added. "
+                        "Refresh the page to see it in the rule list."
+                    )
+                    # Reset selection state so the new rule appears
+                    st.session_state.pop(sel_key, None)
+                    st.session_state.pop(deleted_key, None)
+                    st.rerun()
+                else:
+                    st.error(f"Failed: {resp.get('error')}")
+
     # ── Summary & Sync ─────────────────────────────────────────────────
     all_visible = [r for r in all_rules if r["rule_id"] not in st.session_state[deleted_key]]
     total_selected = sum(1 for r in all_visible if st.session_state[sel_key].get(r["rule_id"], True))
@@ -650,58 +713,11 @@ elif page == "✅ Approvals":
                 else:
                     st.error(f"Submission failed: {resp.get('error')}")
     else:
-        st.success("Checkpoint 1 approved. SQL and consolidated stored procedure are ready.")
+        st.success("Checkpoint 1 approved — SQL generated and consolidated stored procedure ready.")
         if active_rules:
             sql_ready = sum(1 for r in active_rules if r.get("has_sql"))
             st.caption(f"SQL generated for {sql_ready} / {len(active_rules)} active rules.")
 
-    st.divider()
-
-    # ══════════════════════════════════════════════════════════════════
-    # CHECKPOINT 2
-    # ══════════════════════════════════════════════════════════════════
-    cp2_label = {"approved": "✅ APPROVED", "rejected": "❌ REJECTED",
-                 "modified": "🔄 MODIFIED", "pending": "⏳ PENDING"}.get(cp2, "⏳ PENDING")
-    st.markdown(f"#### Checkpoint 2 — Monitoring & Execution Approval &nbsp; `{cp2_label}`",
-                unsafe_allow_html=True)
-
-    if cp1 != "approved":
-        st.info("Complete Checkpoint 1 before proceeding.")
-    elif cp2 != "approved":
-        with st.form("cp2_form"):
-            approver_id2 = st.text_input("Approver ID / Email",
-                                         placeholder="data-steward@company.com", key="cp2_approver")
-            decision2 = st.radio("Decision", ["APPROVED", "REJECTED", "MODIFIED"],
-                                 horizontal=True, key="cp2_dec")
-            comments2 = st.text_area("Comments", placeholder="Execution schedule confirmed.",
-                                     key="cp2_comments")
-            submitted2 = st.form_submit_button("Submit Checkpoint 2", type="primary")
-
-        if submitted2:
-            if not approver_id2:
-                st.error("Approver ID is required.")
-            else:
-                with st.spinner("Submitting..."):
-                    resp2 = api_post("/api/v1/approvals/submit", {
-                        "session_id": session_id,
-                        "stage": "approval_2",
-                        "status": decision2.lower(),
-                        "approver_id": approver_id2,
-                        "comments": comments2,
-                        "rule_modifications": [],
-                    })
-                if resp2.get("success"):
-                    if decision2 == "APPROVED":
-                        st.success("Checkpoint 2 approved. Workflow complete.")
-                    elif decision2 == "REJECTED":
-                        st.error("Checkpoint 2 rejected.")
-                    else:
-                        st.warning("Sent back for modification.")
-                    st.rerun()
-                else:
-                    st.error(f"Submission failed: {resp2.get('error')}")
-    else:
-        st.success("Checkpoint 2 approved. Workflow complete.")
         st.divider()
         st.markdown("#### Run DQ Checks")
 

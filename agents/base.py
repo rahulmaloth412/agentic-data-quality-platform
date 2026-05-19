@@ -34,38 +34,48 @@ class BaseAgent:
         self._client = genai.Client(api_key=settings.gemini.api_key)
         self._log = logger.bind(agent=agent_name)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        reraise=True,
-    )
     async def _call_claude(
         self,
         prompt: str,
         context: Optional[dict[str, Any]] = None,
         stream: bool = False,
     ) -> str:
-        """Call Gemini API and return the text response."""
+        """Call Gemini API, falling back through model list on 429 rate-limit errors."""
         content = prompt
         if context:
             context_str = json.dumps(context, indent=2, default=str)
             content = f"Context:\n{context_str}\n\n{prompt}"
 
-        self._log.info("calling_gemini", model=self._model, prompt_preview=prompt[:100])
-        start = time.monotonic()
+        settings = get_settings()
+        models_to_try = [self._model] + [
+            m for m in settings.gemini.fallback_models if m != self._model
+        ]
 
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=content,
-            config=types.GenerateContentConfig(
-                system_instruction=self._system_prompt,
-                max_output_tokens=self._max_tokens,
-            ),
-        )
+        last_exc: Exception | None = None
+        for model in models_to_try:
+            try:
+                self._log.info("calling_gemini", model=model, prompt_preview=prompt[:100])
+                start = time.monotonic()
+                response = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=content,
+                    config=types.GenerateContentConfig(
+                        system_instruction=self._system_prompt,
+                        max_output_tokens=self._max_tokens,
+                    ),
+                )
+                duration = time.monotonic() - start
+                self._log.info("gemini_response_received", model=model,
+                               duration_seconds=round(duration, 2))
+                return response.text
+            except Exception as exc:
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    self._log.warning("gemini_rate_limited", model=model, trying_next=True)
+                    last_exc = exc
+                    continue
+                raise
 
-        duration = time.monotonic() - start
-        self._log.info("gemini_response_received", duration_seconds=round(duration, 2))
-        return response.text
+        raise last_exc or RuntimeError("All Gemini models exhausted")
 
     async def _call_claude_json(
         self, prompt: str, context: Optional[dict[str, Any]] = None

@@ -21,7 +21,6 @@ Focus on:
   - Domain-specific value constraints  (e.g. discount_pct must be between 0 and 100)
   - Referential business logic  (e.g. every order must belong to an active customer)
   - SLA / process rules  (e.g. orders should be fulfilled within 3 days of placement)
-  - Aggregate anomaly rules  (e.g. daily revenue should not drop > 50% vs 7-day average)
 
 Always respond with valid JSON only. No markdown fences. No explanation outside the JSON.
 """
@@ -29,13 +28,16 @@ Always respond with valid JSON only. No markdown fences. No explanation outside 
 RULE_INFERENCE_PROMPT_V1 = """Analyse the following BigQuery table and generate BUSINESS LOGIC DQ rules.
 
 Table: `{project_id}.{dataset_id}.{table_name}`
+{table_description_section}
 
-## Schema (column name → data type, nullable)
+## Schema (each column: name, type, nullable, plus any description / partition / clustering / PII / business-type hints available)
 {schema_json}
 
 {profiles_section}
 
 {semantics_section}
+
+{existing_rules_section}
 
 {user_context_section}
 
@@ -45,11 +47,14 @@ orders, financial transactions, user accounts) from the table and column names, 
 that a data owner or business analyst would care about.
 
 DO NOT generate:
-  - Not-null checks (handled by technical agent)
+  - Not-null / completeness checks (handled by technical agent)
   - Uniqueness checks on ID columns (handled by technical agent)
   - Email / phone / URL format checks (handled by technical agent)
   - Freshness checks based on timestamp columns (handled by technical agent)
   - Row-count / volume checks (handled by technical agent)
+  - Any rule that duplicates one already listed in "Existing technical rules" above
+
+Only use column names that appear in the schema above. NEVER invent column names.
 
 Return ONLY this JSON:
 {{
@@ -58,15 +63,55 @@ Return ONLY this JSON:
     {{
       "rule_id": "BRUL_<8-char hex>",
       "rule_name": "<concise, descriptive name>",
-      "rule_category": "<validity|integrity|consistency|freshness|volume>",
+      "rule_category": "<validity|integrity|consistency>",
       "description": "<plain English: what is validated and why it can fail>",
       "rationale": "<why this matters for the business domain inferred above>",
-      "column_name": "<primary column name, or null for cross-column / table-level rules>",
-      "severity": "<FAIL|WARN|INFO>",
+      "column_name": "<primary column name from the schema, or null only for cross-column / table-level rules>",
+      "severity": "<FAIL|WARN|INFO — see severity guidance below>",
       "threshold": <float 0.0-1.0 for rate-based rules, 0.0 for exact checks>,
       "execution_frequency": "<hourly|daily|weekly>",
-      "parameters": {{}}
+      "parameters": <see "parameters" guidance below>
     }}
   ]
 }}
+
+## severity guidance
+Choose severity based on downstream impact, not on confidence:
+
+  FAIL  Breaking the rule means the data is wrong in a way that will produce
+        incorrect results downstream — financial reports, customer-facing
+        outputs, irreversible state transitions. Block the pipeline. Examples:
+        FK orphan, negative monetary amount, status state-machine violation.
+
+  WARN  Breaking the rule signals likely data corruption or upstream drift but
+        downstream reads can still proceed. A human should investigate within
+        a business day. Examples: percentage outside expected range, unusual
+        enum value not in the canonical set, derived-field mismatch.
+
+  INFO  Captured for monitoring / trend analysis only. No alert fires.
+        Examples: counts of rows in rarely-used optional states, observed
+        cardinality of a low-priority column.
+
+If unsure between FAIL and WARN, choose WARN. Reserve FAIL for cases where a
+downstream business decision would be measurably wrong.
+
+## parameters guidance
+Fill `parameters` based on `rule_category` so the SQL generator can render
+the rule deterministically (without calling an LLM again):
+
+  validity (regex)  →  {{"regex_pattern": "<BQ-flavoured regex>", "threshold": 0.0}}
+  validity (enum)   →  {{"allowed_values": ["A","B","C"], "threshold": 0.0}}
+  validity (range)  →  {{"has_min": true, "min_value": 0, "has_max": true, "max_value": 100, "threshold": 0.0}}
+  consistency       →  {{"fail_condition": "<BQ row-level boolean — TRUE = row fails>", "threshold": 0.0,
+                          "expected_label": "<short human label, e.g. 'ship_date >= order_date'>"}}
+  integrity (FK)    →  {{"ref_project": "<proj>", "ref_dataset": "<ds>", "ref_table": "<t>", "ref_column": "<c>"}}
+
+For `consistency` rules, write `fail_condition` as a row-level BigQuery
+expression using backtick-quoted column names that EXIST in the schema above:
+  "`ship_date` < `order_date`"
+  "`status` = 'SHIPPED' AND `tracking_number` IS NULL"
+  "`total_amount` <> `unit_price` * `quantity`"
+
+For `integrity` FK rules, also set `column_name` to the source FK column on
+THIS table (not the referenced column).
 """

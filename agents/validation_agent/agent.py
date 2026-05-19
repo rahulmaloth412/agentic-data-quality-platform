@@ -53,12 +53,13 @@ class ValidationAgent:
 
         if consolidated_sp_name:
             # Single CALL executes the full consolidated procedure
+            # SP parameter is p_run_id (prefixed to avoid conflict with output column 'run_id')
             call_sql = (
                 f"CALL `{self._dq_project}.{self._dq_dataset}.{consolidated_sp_name}`"
                 f"('{run_id}')"
             )
             try:
-                await self._bq_client.execute_dml(call_sql)
+                await self._bq_client.execute_ddl(call_sql)
                 self._log.info("consolidated_sp_executed", sp=consolidated_sp_name, run_id=run_id)
             except Exception as exc:
                 self._log.error("consolidated_sp_execution_failed", error=str(exc))

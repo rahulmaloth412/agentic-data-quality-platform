@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
-from typing import Any
+from typing import Any, Iterable
 
 import structlog
 
@@ -34,6 +35,24 @@ _SEVERITY_MAP = {
     "FAIL": Severity.FAIL,
 }
 
+# Profiles can balloon for wide tables — slice by record count, not characters.
+_MAX_PROFILE_COLUMNS = 40
+_PROFILE_KEEP_KEYS = (
+    "column_name",
+    "data_type",
+    "null_rate",
+    "distinct_count",
+    "cardinality_ratio",
+    "min_value",
+    "max_value",
+    "avg_value",
+    "sample_values",
+)
+_MAX_SEMANTICS_COLUMNS = 60
+
+# Match backtick-quoted identifiers in LLM-emitted fail_condition strings.
+_BACKTICK_IDENT_RE = re.compile(r"`([^`]+)`")
+
 
 class BusinessRuleRecommendationAgent(BaseAgent):
     """Uses Gemini to generate business-domain DQ rules from table schema and context."""
@@ -54,80 +73,227 @@ class BusinessRuleRecommendationAgent(BaseAgent):
         semantics: dict[str, Any],
         rule_set_version_id: str,
         custom_context: str | None = None,
+        existing_rules: list[DQRule] | None = None,
+        dataplex_tags: list[dict[str, Any]] | None = None,
     ) -> list[DQRule]:
-        """Generate Gemini-inferred business DQ rules for a single table."""
-        columns = metadata.get("columns", [])
+        """Generate LLM-inferred business DQ rules for a single table.
+
+        Drops any rule that references column names not present in the
+        table's actual schema — protects against LLM hallucination.
+        """
+        columns_meta = metadata.get("columns", []) or []
+        known_columns = {c.get("column_name") for c in columns_meta if c.get("column_name")}
+
         self._log.info(
             "business_rule_inference_start",
             table=table_name,
-            columns=len(columns),
+            columns=len(columns_meta),
+            existing_rules=len(existing_rules) if existing_rules else 0,
+            has_custom_context=bool(custom_context),
         )
 
-        # Schema is the primary input — always available
-        schema_rows = [
-            {
-                "column": c.get("column_name", ""),
-                "type": c.get("data_type", "STRING"),
-                "nullable": c.get("is_nullable", "YES") == "YES",
-            }
-            for c in columns
-        ]
-        schema_json = json.dumps(schema_rows, indent=2)
-
-        # Profiles section — include only when meaningful data exists
-        col_profiles = profiles.get("columns", []) if isinstance(profiles, dict) else []
-        if col_profiles:
-            profiles_section = (
-                "## Column Profiles (statistics)\n"
-                + json.dumps(col_profiles, indent=2, default=str)[:3000]
-            )
-        else:
-            profiles_section = ""
-
-        # Semantics section — include only when Gemini inferred them earlier
-        if semantics:
-            semantics_section = (
-                "## Inferred Column Semantics\n"
-                + json.dumps(semantics, indent=2, default=str)[:2000]
-            )
-        else:
-            semantics_section = ""
-
-        # User-provided business context
-        if custom_context:
-            user_context_section = f"## Additional Business Context (provided by analyst)\n{custom_context}"
-        else:
-            user_context_section = ""
-
-        prompt = RULE_INFERENCE_PROMPT_V1.format(
+        prompt = self._build_prompt(
             project_id=project_id,
             dataset_id=dataset_id,
             table_name=table_name,
-            schema_json=schema_json,
-            profiles_section=profiles_section,
-            semantics_section=semantics_section,
-            user_context_section=user_context_section,
+            metadata=metadata,
+            profiles=profiles,
+            semantics=semantics,
+            dataplex_tags=dataplex_tags or [],
+            existing_rules=existing_rules or [],
+            custom_context=custom_context,
         )
 
         try:
             result = await self._call_claude_json(prompt)
-            raw_rules = result.get("rules", [])
-            inferred_domain = result.get("inferred_domain", "")
-            if inferred_domain:
-                self._log.info("domain_inferred", table=table_name, domain=inferred_domain)
-
-            dq_rules = [
-                self._parse_rule(raw, project_id, dataset_id, table_name, rule_set_version_id)
-                for raw in raw_rules
-                if isinstance(raw, dict)
-            ]
-
-            self._log.info("business_rules_generated", table=table_name, count=len(dq_rules))
-            return dq_rules
-
         except Exception as exc:
             self._log.error("business_rule_inference_failed", table=table_name, error=str(exc))
             return []
+
+        raw_rules = result.get("rules", []) if isinstance(result, dict) else []
+        inferred_domain = result.get("inferred_domain", "") if isinstance(result, dict) else ""
+        if inferred_domain:
+            self._log.info("domain_inferred", table=table_name, domain=inferred_domain)
+
+        parsed: list[DQRule] = []
+        for raw in raw_rules:
+            if not isinstance(raw, dict):
+                continue
+            rule = self._parse_rule(raw, project_id, dataset_id, table_name, rule_set_version_id)
+            if not self._validate_column_refs(rule, known_columns):
+                continue
+            parsed.append(rule)
+
+        self._log.info(
+            "business_rules_generated",
+            table=table_name,
+            generated=len(parsed),
+            dropped=len(raw_rules) - len(parsed),
+        )
+        return parsed
+
+    # ------------------------------------------------------------------
+    # Prompt assembly
+    # ------------------------------------------------------------------
+
+    def _build_prompt(
+        self,
+        *,
+        project_id: str,
+        dataset_id: str,
+        table_name: str,
+        metadata: dict[str, Any],
+        profiles: dict[str, Any],
+        semantics: dict[str, Any],
+        dataplex_tags: list[dict[str, Any]],
+        existing_rules: list[DQRule],
+        custom_context: str | None,
+    ) -> str:
+        schema_json = self._render_schema(
+            metadata=metadata,
+            semantics=semantics,
+            dataplex_tags=dataplex_tags,
+        )
+        return RULE_INFERENCE_PROMPT_V1.format(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            table_name=table_name,
+            table_description_section=self._render_table_description(metadata),
+            schema_json=schema_json,
+            profiles_section=self._render_profiles_section(profiles),
+            semantics_section=self._render_semantics_section(semantics),
+            existing_rules_section=self._render_existing_rules_section(existing_rules, table_name),
+            user_context_section=self._render_user_context_section(custom_context),
+        )
+
+    @staticmethod
+    def _render_table_description(metadata: dict[str, Any]) -> str:
+        bits: list[str] = []
+        desc = (metadata.get("description") or "").strip()
+        if desc:
+            bits.append(f"Description: {desc}")
+        row_count = metadata.get("row_count")
+        if row_count:
+            bits.append(f"Approx. rows: {row_count:,}")
+        partition_col = metadata.get("partition_column")
+        if partition_col:
+            bits.append(f"Partition column: {partition_col}")
+        clustering = metadata.get("clustering_columns") or []
+        if clustering:
+            bits.append(f"Clustering: {', '.join(clustering)}")
+        labels = metadata.get("labels") or {}
+        if labels:
+            bits.append("Labels: " + ", ".join(f"{k}={v}" for k, v in labels.items()))
+        if not bits:
+            return ""
+        return "\n" + "\n".join(bits)
+
+    def _render_schema(
+        self,
+        *,
+        metadata: dict[str, Any],
+        semantics: dict[str, Any],
+        dataplex_tags: list[dict[str, Any]],
+    ) -> str:
+        """Build a schema-row list enriched with description / partition / clustering / PII / semantic hints."""
+        columns = metadata.get("columns", []) or []
+        partition_col = metadata.get("partition_column")
+        clustering = set(metadata.get("clustering_columns") or [])
+
+        # Dataplex / column-tag lookup keyed by column_name
+        tag_index: dict[str, dict[str, Any]] = {}
+        for tag in dataplex_tags:
+            col = tag.get("column_name") or tag.get("column")
+            if col:
+                tag_index[col] = tag
+
+        rows: list[dict[str, Any]] = []
+        for c in columns:
+            col_name = c.get("column_name", "")
+            sem = semantics.get(col_name, {}) if isinstance(semantics, dict) else {}
+            tag = tag_index.get(col_name, {})
+
+            row: dict[str, Any] = {
+                "column": col_name,
+                "type": c.get("data_type", "STRING"),
+                "nullable": c.get("is_nullable", "YES") == "YES",
+            }
+            description = (c.get("description") or "").strip()
+            if description:
+                row["description"] = description
+            if col_name == partition_col:
+                row["partition_key"] = True
+            if col_name in clustering:
+                row["clustering_key"] = True
+
+            business_type = sem.get("business_type") if isinstance(sem, dict) else None
+            if business_type and business_type != "unknown":
+                row["business_type"] = business_type
+            if isinstance(sem, dict) and sem.get("pii_likely"):
+                row["pii_likely"] = True
+
+            tag_pii = tag.get("pii") or tag.get("pii_type") or tag.get("sensitivity")
+            if tag_pii:
+                row["dataplex_pii"] = tag_pii
+
+            rows.append(row)
+
+        return json.dumps(rows, indent=2, default=str)
+
+    def _render_profiles_section(self, profiles: dict[str, Any]) -> str:
+        col_profiles = profiles.get("columns") if isinstance(profiles, dict) else None
+        if not col_profiles:
+            return ""
+        trimmed = [
+            {k: v for k, v in (p or {}).items() if k in _PROFILE_KEEP_KEYS}
+            for p in col_profiles[:_MAX_PROFILE_COLUMNS]
+        ]
+        elided = max(0, len(col_profiles) - _MAX_PROFILE_COLUMNS)
+        header = "## Column Profiles (statistics)"
+        if elided:
+            header += f"  ({elided} additional columns omitted)"
+        return f"{header}\n{json.dumps(trimmed, indent=2, default=str)}"
+
+    def _render_semantics_section(self, semantics: dict[str, Any]) -> str:
+        if not isinstance(semantics, dict) or not semantics:
+            return ""
+        items = list(semantics.items())[:_MAX_SEMANTICS_COLUMNS]
+        elided = max(0, len(semantics) - _MAX_SEMANTICS_COLUMNS)
+        header = "## Inferred Column Semantics"
+        if elided:
+            header += f"  ({elided} additional columns omitted)"
+        return f"{header}\n{json.dumps(dict(items), indent=2, default=str)}"
+
+    def _render_existing_rules_section(
+        self, existing_rules: list[DQRule], table_name: str
+    ) -> str:
+        """Anti-context: tell the LLM what the technical engine already covers."""
+        relevant = [r for r in existing_rules if r.table_name == table_name]
+        if not relevant:
+            return ""
+        summary = [
+            {
+                "rule_id": r.rule_id,
+                "rule_name": r.rule_name,
+                "category": r.rule_category.value,
+                "column": r.column_name,
+            }
+            for r in relevant
+        ]
+        return (
+            "## Existing technical rules already generated for this table — DO NOT duplicate\n"
+            + json.dumps(summary, indent=2, default=str)
+        )
+
+    @staticmethod
+    def _render_user_context_section(custom_context: str | None) -> str:
+        if not custom_context:
+            return ""
+        return f"## Additional Business Context (provided by analyst)\n{custom_context}"
+
+    # ------------------------------------------------------------------
+    # Parsing & validation
+    # ------------------------------------------------------------------
 
     def _parse_rule(
         self,
@@ -137,8 +303,8 @@ class BusinessRuleRecommendationAgent(BaseAgent):
         table: str,
         version_id: str,
     ) -> DQRule:
-        category_str = raw.get("rule_category", "validity").lower()
-        severity_str = raw.get("severity", "WARN").upper()
+        category_str = (raw.get("rule_category") or "validity").lower()
+        severity_str = (raw.get("severity") or "WARN").upper()
 
         return DQRule(
             rule_id=raw.get("rule_id") or f"BRUL_{uuid.uuid4().hex[:8]}",
@@ -151,8 +317,36 @@ class BusinessRuleRecommendationAgent(BaseAgent):
             project_id=project,
             dataset_name=dataset,
             table_name=table,
-            column_name=raw.get("column_name"),
-            parameters=raw.get("parameters", {}),
+            column_name=raw.get("column_name") or None,
+            parameters=raw.get("parameters", {}) or {},
             rationale=raw.get("rationale"),
             rule_set_version_id=version_id,
         )
+
+    def _validate_column_refs(self, rule: DQRule, known_columns: set[str]) -> bool:
+        """Drop rules that name columns not in the table's actual schema."""
+        bad: list[str] = []
+
+        # column_name (if set) must exist
+        if rule.column_name and rule.column_name not in known_columns:
+            bad.append(rule.column_name)
+
+        # fail_condition must only reference real columns
+        fail_cond = rule.parameters.get("fail_condition") if rule.parameters else None
+        if isinstance(fail_cond, str):
+            for ident in _BACKTICK_IDENT_RE.findall(fail_cond):
+                # Skip dotted identifiers (table refs) — only flag bare column names
+                if "." in ident:
+                    continue
+                if ident not in known_columns:
+                    bad.append(ident)
+
+        if bad:
+            self._log.warning(
+                "rule_dropped_hallucinated_columns",
+                rule_id=rule.rule_id,
+                rule_name=rule.rule_name,
+                missing_columns=sorted(set(bad)),
+            )
+            return False
+        return True

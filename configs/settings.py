@@ -24,7 +24,11 @@ class GeminiSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GEMINI_", env_file=".env", extra="ignore")
 
     api_key: str = Field(default="", description="Gemini API key")
-    model: str = Field(default="gemini-2.5-flash-lite", description="Default Gemini model")
+    model: str = Field(default="gemini-flash-lite-latest", description="Default Gemini model")
+    fallback_models: list[str] = Field(
+        default=["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-flash-latest"],
+        description="Ordered fallback models when primary is rate-limited",
+    )
     max_tokens: int = Field(default=8192, description="Max output tokens")
     timeout: float = Field(default=120.0, description="API request timeout in seconds")
 

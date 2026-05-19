@@ -124,8 +124,17 @@ class OrchestratorAgent(BaseAgent):
         await self._persist_state(state)
         return state
 
-    async def run_stage_business_rules(self, state: WorkflowState) -> WorkflowState:
-        """Stage 3: Generate Claude-inferred business rules."""
+    async def run_stage_business_rules(
+        self,
+        state: WorkflowState,
+        custom_context: str | None = None,
+    ) -> WorkflowState:
+        """Stage 3: Generate LLM-inferred business rules.
+
+        Passes the technical rules already generated for each table as
+        anti-context so the LLM avoids duplicating them. Forwards any
+        Dataplex column tags collected during metadata discovery.
+        """
         state.advance_stage(WorkflowStage.BUSINESS_RULES)
 
         if not state.rule_set:
@@ -133,6 +142,7 @@ class OrchestratorAgent(BaseAgent):
             return state
 
         version_id = state.rule_set.rule_set_version_id
+        technical_rules = state.rule_set.technical_rules
         try:
             for table_name, table_data in state.metadata.items():
                 business_rules = await self._business_agent.run(
@@ -143,6 +153,9 @@ class OrchestratorAgent(BaseAgent):
                     profiles=table_data.get("profiling", {}),
                     semantics=table_data.get("semantics", {}),
                     rule_set_version_id=version_id,
+                    custom_context=custom_context,
+                    existing_rules=technical_rules,
+                    dataplex_tags=table_data.get("dataplex_tags") or [],
                 )
                 state.rule_set.business_rules.extend(business_rules)
 

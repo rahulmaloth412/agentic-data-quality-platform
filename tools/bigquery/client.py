@@ -98,7 +98,7 @@ class BigQueryClient:
     async def execute_dml(
         self, sql: str, params: Optional[dict[str, Any]] = None, timeout: float = 300.0
     ) -> int:
-        """Execute a DML statement and return rows affected."""
+        """Execute a parameterized DML statement and return rows affected."""
         bq_params: list[ScalarQueryParameter] = []
         if params:
             for name, value in params.items():
@@ -116,6 +116,21 @@ class BigQueryClient:
         rows_affected = await self._run_sync(_run)
         self._log.info("dml_complete", rows_affected=rows_affected)
         return rows_affected
+
+    async def execute_ddl(self, sql: str, timeout: float = 300.0) -> None:
+        """Execute a DDL statement (CREATE, DROP, ALTER, CREATE PROCEDURE, etc.).
+
+        Unlike execute_dml, this uses a plain QueryJobConfig with no
+        query_parameters — BigQuery rejects parameterized DDL.
+        """
+        self._log.info("executing_ddl", sql_preview=sql[:120])
+
+        def _run() -> None:
+            job = self._get_client().query(sql, job_config=QueryJobConfig(), timeout=timeout)
+            job.result(timeout=timeout)
+
+        await self._run_sync(_run)
+        self._log.info("ddl_complete")
 
     async def insert_rows(
         self, table_id: str, rows: list[dict[str, Any]], skip_invalid: bool = False

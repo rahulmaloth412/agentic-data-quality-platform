@@ -20,7 +20,7 @@ A production-grade, enterprise-ready **AI-powered Data Quality and Observability
     │  [2] Technical Rule Engine     →  25+ standard DQ rules     │
     │  [3] Business Rule Agent       →  Claude-inferred rules     │
     │  [4] ✅ Human Approval Gate 1  →  Rule set approval         │
-    │  [5] SQL Generation Agent      →  Jinja2 + Claude SQL       │
+    │  [5] SQL Generation Agent      →  programmatic + AI fallback│
     │  [6] DAG Integration Agent     →  Airflow DAG generation    │
     │  [7] Monitoring Agent          →  SLA + anomaly detection   │
     │  [8] ✅ Human Approval Gate 2  →  Monitoring approval       │
@@ -178,12 +178,11 @@ agentic-data-quality-platform/
 ├── tools/                     # Reusable tool integrations
 │   ├── bigquery/              # BQ client, schema discovery, execution
 │   ├── dataplex/              # Catalog, lineage, INFORMATION_SCHEMA fallback
-│   ├── sql_tools/             # Jinja2 SQL builder and validator
+│   ├── sql_tools/             # Programmatic SQL generator + validator
 │   ├── airflow/               # DAG generation and Composer client
 │   └── alerts/                # Slack and email connectors
 │
 ├── prompts/                   # Versioned LLM prompt templates
-├── sql_templates/             # Jinja2 DQ SQL templates (9 rule types)
 ├── dq_rules/                  # Rule library (25+ rules) and schemas
 ├── schemas/                   # Pydantic v2 models and BigQuery schemas
 ├── configs/                   # Pydantic-settings configuration
@@ -223,16 +222,21 @@ agentic-data-quality-platform/
 
 ## DQ Rule Categories
 
-| Category | Rules | SQL Template |
+Every rule produces one uniform row matching the `dq_results` schema. All
+SQL is generated programmatically by `tools/sql_tools/sql_generator.py` —
+no template files. Rules are combined into one `UNION ALL` per session and
+deployed as a single `CREATE OR REPLACE PROCEDURE`.
+
+| Category | Examples | Builder |
 |---|---|---|
-| Completeness | Not null, sparse field, low null rate | `completeness_check.sql.j2` |
-| Uniqueness | PK uniqueness, composite key, email unique | `uniqueness_check.sql.j2` |
-| Validity | Email regex, phone format, status enum, range | `validity_regex_check.sql.j2`, `enum_values_check.sql.j2`, `range_check.sql.j2` |
-| Freshness | Daily/hourly SLA, late arrival | `freshness_check.sql.j2` |
-| Volume | Min row count, volume anomaly | `volume_check.sql.j2` |
-| Schema Drift | Column add/remove, type change | `schema_drift_check.sql.j2` |
-| Integrity | FK referential integrity | `referential_integrity_check.sql.j2` |
-| Consistency | Date ordering, country codes | Combined templates |
+| Completeness | Not null, sparse field, low null rate | `DQSQLGenerator._render_completeness` |
+| Uniqueness | PK uniqueness, composite key | `_render_uniqueness` |
+| Validity | Regex, enum, numeric range | `_render_validity` |
+| Freshness | Daily/hourly SLA, late arrival | `_render_freshness` |
+| Volume | Min/max row count | `_render_volume` |
+| Schema Drift | Column add/remove, type change | `_render_schema_drift` |
+| Integrity | FK referential integrity | `_render_integrity` |
+| Consistency | Cross-column / business rules (AI emits `fail_condition`) | `_render_consistency` |
 
 ---
 
@@ -297,7 +301,7 @@ pytest tests/integration/ -m integration -v
 | Data Catalog | Dataplex |
 | Workflow Scheduling | Airflow / Cloud Composer |
 | API | FastAPI + Pydantic v2 |
-| SQL Templating | Jinja2 |
+| SQL Generation | Programmatic (Python) + AI fallback |
 | Alerting | Slack SDK + SendGrid |
 | Observability | OpenTelemetry + structlog |
 | Infrastructure | Terraform + Cloud Build |
